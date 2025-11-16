@@ -6,9 +6,11 @@ AWS ParallelCluster 환경에서 대규모 분산 학습을 수행하기 위한 
 
 이 프로젝트는 GPU 클러스터를 활용한 머신러닝 모델 학습을 위한 환경 설정과 코드를 포함합니다.
 
+## 사전 고려 사항
+
 ## 진행절차
-### 사전 준비 및 계획
-- 클러스터 사양 확정(예시)
+### Phase 0: 사전 준비 및 계획(예시)
+- 클러스터 사양 확정
 
   - 인스턴스: P5e.48xlarge × 80개
   - 리전: ap-southeast-3 (자카르타)
@@ -110,6 +112,232 @@ fi
 echo "All operations completed successfully"
 ```
 
+### Phase 1: 인프라 구축 (예시)
+- VPC 및 네트워크 생성
+  - VPC 생성
+  - 서브네 생성
+  - 인터넷 게이트웨이 및 NAT 게이트웨이
+  - 라우팅 테이블 설정
+- SG 설정
+  - 헤드 노드와 컴퓨트 노드간 통신
+  - 헤드 노드 SSH 접속용
+  - Grafana 접근용 SG(설치한다면)
+- 키페어 설정(헤드 노드 접속용)
+
+### Phase 2: 클러스터 배포(예시)
+- ParallelCluster 설치(최신 버전 권장)
+  -  https://github.com/aws/aws-parallelcluster/releases
+  -  Yaml 설정 파일 작성
+```
+Region: ap-southeast-3
+
+Image:
+  Os: alinux2
+
+HeadNode:
+  InstanceType: c5.9xlarge
+  LocalStorage:
+    RootVolume:
+      Size: 100
+      VolumeType: gp3
+      Iops: 10000
+      Snapshot: true  # 헤드노드 백업 활성화
+  
+  Networking:
+    SubnetId: subnet-xxxxxxxxx  # PUBLIC_SUBNET
+    SecurityGroups:
+      - sg-internal-xxxxxx  # INTERNAL_SG
+    AdditionalSecurityGroups:
+      - sg-ssh-xxxxxx  # SSH_SG
+      - sg-grafana-xxxxxx  # GRAFANA_SG
+
+  Ssh:
+    KeyName: p5e-cluster-key
+
+  Iam:
+    S3Access:
+      - BucketName: training-data-jakarta
+        EnableWriteAccess: false
+      - BucketName: checkpoint-jakarta
+        EnableWriteAccess: true
+      - BucketName: logs-jakarta
+        EnableWriteAccess: true
+    AdditionalIamPolicies:
+      - Policy: arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      - Policy: arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      - Policy: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  CustomActions:
+    OnNodeConfigured:
+      Script: s3://scripts-jakarta/setup_headnode.sh
+
+Scheduling:
+  Scheduler: slurm
+  ScalingStrategy: all-or-nothing
+  SlurmSettings:
+    ScaledownIdletime: 30  # 30분으로 증가
+    EnableMemoryBasedScheduling: true
+    CustomSlurmSettings:
+      - SelectType: select/cons_tres
+      - SelectTypeParameters: CR_Core_Memory
+      - ResumeTimeout: 1800
+      - SuspendTimeout: 300
+      - SuspendTime: 300
+      - ResumeRate: 10
+      - SuspendRate: 10
+
+SlurmQueues:
+  - Name: gpu-queue
+    CapacityType: ONDEMAND
+    ComputeSettings:
+      LocalStorage:
+        RootVolume:
+          Size: 200
+          VolumeType: gp3
+          Iops: 16000
+          Throughput: 1000
+          Snapshot: true
+    
+    Networking:
+      SubnetIds:
+        - subnet-yyyyyyyyy1  # PRIVATE_SUBNET_1
+        - subnet-yyyyyyyyy2  # PRIVATE_SUBNET_2
+      SecurityGroups:
+        - sg-internal-xxxxxx  # INTERNAL_SG
+
+    HealthChecks:
+      Gpu:
+        Enabled: true
+      FileSystem:
+        Enabled: true
+      
+    ComputeResources:
+      - Name: p5e-training
+        InstanceType: p5e.48xlarge
+        MinCount: 0
+        MaxCount: 80
+        DisableSimultaneousMultithreading: false
+        Efa:
+          Enabled: true
+          GdrSupport: true
+        CapacityReservationTarget:
+          CapacityReservationId: cr-xxxxxxxxxxxxx  # ODCR
+        Networking:
+          PlacementGroup:
+            Enabled: true
+            Name: pg-training
+
+    Iam:
+      S3Access:
+        - BucketName: training-data-jakarta
+          EnableWriteAccess: false
+        - BucketName: checkpoint-jakarta
+          EnableWriteAccess: true
+      AdditionalIamPolicies:
+        - Policy: arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - Policy: arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+    CustomActions:
+      OnNodeConfigured:
+        Script: s3://scripts-jakarta/setup_compute_node.sh
+
+SharedStorage:
+  - MountDir: /fsx1
+    Name: fsx-data-1
+    StorageType: FsxLustre
+    FsxLustreSettings:
+      StorageCapacity: 14400
+      DeploymentType: PERSISTENT_1
+      StorageType: SSD
+      PerUnitStorageThroughput: 200
+      DataCompressionType: LZ4
+      ImportPath: s3://training-data-jakarta/datasets
+      AutoImportPolicy: NEW_CHANGED
+      BackupRetentionDays: 7
+      AutomaticBackupRetentionDays: 7
+      DailyAutomaticBackupStartTime: "00:00"
+
+  - MountDir: /fsx2
+    Name: fsx-checkpoint
+    StorageType: FsxLustre
+    FsxLustreSettings:
+      StorageCapacity: 14400
+      DeploymentType: PERSISTENT_1
+      StorageType: SSD
+      PerUnitStorageThroughput: 200
+      DataCompressionType: LZ4
+      ExportPath: s3://checkpoint-jakarta
+      AutoExportPolicy: NEW_CHANGED
+      BackupRetentionDays: 7
+      AutomaticBackupRetentionDays: 7
+      DailyAutomaticBackupStartTime: "01:00"
+
+  - MountDir: /fsx3
+    Name: fsx-logs
+    StorageType: FsxLustre
+    FsxLustreSettings:
+      StorageCapacity: 7200
+      DeploymentType: PERSISTENT_1
+      StorageType: SSD
+      PerUnitStorageThroughput: 200
+      BackupRetentionDays: 3
+      AutomaticBackupRetentionDays: 3
+      DailyAutomaticBackupStartTime: "02:00"
+
+  - MountDir: /fsx4
+    Name: fsx-scratch
+    StorageType: FsxLustre
+    FsxLustreSettings:
+      StorageCapacity: 7200
+      DeploymentType: PERSISTENT_1
+      StorageType: SSD
+      PerUnitStorageThroughput: 200
+      BackupRetentionDays: 1
+      AutomaticBackupRetentionDays: 1
+      DailyAutomaticBackupStartTime: "03:00"
+
+Monitoring:
+  DetailedMonitoring: true
+  Logs:
+    CloudWatch:
+      Enabled: true
+      RetentionInDays: 30
+    Rotation:
+      Enabled: true
+      RetentionInDays: 15
+  
+  Dashboards:
+    CloudWatch:
+      Enabled: true
+
+Tags:
+  - Key: Project
+    Value: DistributedTraining
+  - Key: Environment
+    Value: Production
+  - Key: Owner
+    Value: YourTeam
+```
+- 주요 특징
+```
+1. 컴퓨팅:
+   └── 단일 ComputeResource로 80대 P5e 관리
+
+2. 스토리지:
+   ├── 훈련 데이터: 14.4TB
+   ├── 체크포인트: 14.4TB
+   ├── 로그: 7.2TB
+   └── 스크래치: 7.2TB
+
+3. 네트워킹:
+   ├── EFA 활성화
+   └── 단일 플레이스먼트 그룹
+
+4. 안정성:
+   ├── 자동 백업
+   ├── 헬스체크
+   └── 상세 모니터링
+```
 
 ## 주요 기능
 
