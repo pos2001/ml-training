@@ -21,8 +21,94 @@ AWS ParallelCluster 환경에서 대규모 분산 학습을 수행하기 위한 
   - 노드 할당: 모델 1-6 각 11노드, 모델 7은 14노드
   - 예상 훈련 기간: 모델당 1-2주
 
+- 훈련 데이터 S3 업로드:
+```
+  - #!/bin/bash
+set -e  # 에러 발생시 스크립트 중단
 
+# 리전 설정
+REGION="ap-southeast-3"
 
+# 버킷 이름 설정
+TRAINING_BUCKET="training-data-jakarta"
+CHECKPOINT_BUCKET="checkpoint-jakarta"
+
+# 로컬 경로 설정
+LOCAL_DATA_PATH="/local/training-data/"
+SAMPLE_DIR="./sample"
+
+echo "Starting S3 operations..."
+
+# 1. S3 버킷 생성
+echo "Creating S3 buckets..."
+for BUCKET in "$TRAINING_BUCKET" "$CHECKPOINT_BUCKET"; do
+    if ! aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null; then
+        aws s3 mb "s3://$BUCKET" --region "$REGION"
+        echo "Created bucket: $BUCKET"
+    else
+        echo "Bucket already exists: $BUCKET"
+    fi
+done
+
+# 2. 데이터 업로드 (멀티파트)
+echo "Uploading data to S3..."
+aws s3 sync "$LOCAL_DATA_PATH" "s3://$TRAINING_BUCKET/datasets/" \
+    --region "$REGION" \
+    --storage-class STANDARD \
+    --delete \
+    --only-show-errors \
+    --metadata md5=$(md5sum "$LOCAL_DATA_PATH"/* | sort | md5sum | cut -d' ' -f1)
+
+# 3. 업로드 확인 및 요약
+echo "Verifying upload..."
+aws s3 ls "s3://$TRAINING_BUCKET/datasets/" \
+    --recursive \
+    --summarize \
+    --human-readable
+
+# 4. 데이터 검증
+echo "Performing data validation..."
+
+# 샘플 디렉토리 생성
+mkdir -p "$SAMPLE_DIR"
+
+# 샘플 데이터 다운로드
+echo "Downloading sample data..."
+aws s3 cp "s3://$TRAINING_BUCKET/datasets/sample.tar.gz" \
+    "$SAMPLE_DIR/" \
+    --region "$REGION"
+
+# 체크섬 검증
+echo "Validating checksum..."
+LOCAL_MD5=$(md5sum "$SAMPLE_DIR/sample.tar.gz" | cut -d' ' -f1)
+S3_MD5=$(aws s3api head-object \
+    --bucket "$TRAINING_BUCKET" \
+    --key "datasets/sample.tar.gz" \
+    --query 'Metadata.md5' \
+    --output text)
+
+if [ "$LOCAL_MD5" = "$S3_MD5" ]; then
+    echo "Checksum validation passed"
+else
+    echo "Checksum validation failed"
+    exit 1
+fi
+
+# 압축 해제
+echo "Extracting sample data..."
+tar -xzf "$SAMPLE_DIR/sample.tar.gz" -C "$SAMPLE_DIR"
+
+# 데이터셋 검증
+echo "Running dataset validation..."
+if [ -f validate_dataset.py ]; then
+    python validate_dataset.py --data-dir "$SAMPLE_DIR"
+else
+    echo "Error: validate_dataset.py not found"
+    exit 1
+fi
+
+echo "All operations completed successfully"
+```
 
 
 ## 주요 기능
