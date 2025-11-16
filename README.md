@@ -130,214 +130,147 @@ echo "All operations completed successfully"
   -  https://github.com/aws/aws-parallelcluster/releases
 - 2.2 Yaml 설정 파일 작성
 ```
-Region: ap-southeast-3
+Region: ap-southeast-3                # 자카르타 리전 지정
 
 Image:
-  Os: alinux2
+  Os: alinux2                        # Amazon Linux 2 운영체제
 
 HeadNode:
-  InstanceType: c5.9xlarge
-  LocalStorage:
-    RootVolume:
-      Size: 100
-      VolumeType: gp3
-      Iops: 10000
-      Snapshot: true  # 헤드노드 백업 활성화
-  
+  InstanceType: c6i.4xlarge          # 헤드노드용 컴퓨트 최적화 인스턴스
   Networking:
-    SubnetId: subnet-xxxxxxxxx  # PUBLIC_SUBNET
-    SecurityGroups:
-      - sg-internal-xxxxxx  # INTERNAL_SG
-    AdditionalSecurityGroups:
-      - sg-ssh-xxxxxx  # SSH_SG
-      - sg-grafana-xxxxxx  # GRAFANA_SG
-
+    SubnetId: subnet-xxxxxxxxx       # 헤드노드용 퍼블릭 서브넷
   Ssh:
-    KeyName: p5e-cluster-key
-
+    KeyName: your-keypair-name       # SSH 접속용 키페어
   Iam:
-    S3Access:
-      - BucketName: training-data-jakarta
-        EnableWriteAccess: false
-      - BucketName: checkpoint-jakarta
-        EnableWriteAccess: true
-      - BucketName: logs-jakarta
-        EnableWriteAccess: true
-    AdditionalIamPolicies:
-      - Policy: arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
-      - Policy: arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
-      - Policy: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-
-  CustomActions:
-    OnNodeConfigured:
-      Script: s3://scripts-jakarta/setup_headnode.sh
+    AdditionalIamPolicies:           # 헤드노드 추가 IAM 정책
+      - Policy: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # SSM 접속용
 
 Scheduling:
-  Scheduler: slurm
-  ScalingStrategy: all-or-nothing
+  Scheduler: slurm                   # Slurm 스케줄러 사용
+  ScalingStrategy: best-effort       # 최선노력 스케일링 전략
   SlurmSettings:
-    ScaledownIdletime: 30  # 30분으로 증가
-    EnableMemoryBasedScheduling: true
-    CustomSlurmSettings:
-      - SelectType: select/cons_tres
-      - SelectTypeParameters: CR_Core_Memory
-      - ResumeTimeout: 1800
-      - SuspendTimeout: 300
-      - SuspendTime: 300
-      - ResumeRate: 10
-      - SuspendRate: 10
+    ScaledownIdletime: 10           # 10분 유휴 후 스케일다운
+
 
 SlurmQueues:
-  - Name: gpu-queue
-    CapacityType: ONDEMAND
+  - Name: gpu-queue                  # GPU 작업 전용 큐
+    CapacityType: ONDEMAND          # 온디맨드 인스턴스 사용
+    AllocationStrategy: lowest-price # 최저가 할당 전략
     ComputeSettings:
       LocalStorage:
-        RootVolume:
-          Size: 200
-          VolumeType: gp3
-          Iops: 16000
-          Throughput: 1000
-          Snapshot: true
+        RootVolume:                  # 컴퓨트 노드 루트 볼륨 설정
+          Size: 200                  # 200GB 크기
+          VolumeType: gp3           # gp3 타입 사용
+          Iops: 16000               # 16000 IOPS
+          Throughput: 1000          # 1000 MB/s 처리량
     
     Networking:
       SubnetIds:
-        - subnet-yyyyyyyyy1  # PRIVATE_SUBNET_1
-        - subnet-yyyyyyyyy2  # PRIVATE_SUBNET_2
+        - subnet-yyyyyyyyy          # 컴퓨트 노드용 프라이빗 서브넷
+      PlacementGroup:
+        Enabled: true               # 네트워크 성능 최적화를 위한 배치 그룹
       SecurityGroups:
-        - sg-internal-xxxxxx  # INTERNAL_SG
+        - sg-zzzzzzzzz             # 컴퓨트 노드 보안 그룹
 
     HealthChecks:
       Gpu:
-        Enabled: true
-      FileSystem:
-        Enabled: true
-      
-    ComputeResources:
-      - Name: p5e-training
-        InstanceType: p5e.48xlarge
-        MinCount: 0
-        MaxCount: 80
-        DisableSimultaneousMultithreading: false
-        Efa:
-          Enabled: true
-          GdrSupport: true
-        CapacityReservationTarget:
-          CapacityReservationId: cr-xxxxxxxxxxxxx  # ODCR
-        Networking:
-          PlacementGroup:
-            Enabled: true
-            Name: pg-training
+        Enabled: true              # GPU 상태 모니터링 활성화
 
-    Iam:
-      S3Access:
-        - BucketName: training-data-jakarta
-          EnableWriteAccess: false
-        - BucketName: checkpoint-jakarta
-          EnableWriteAccess: true
-      AdditionalIamPolicies:
-        - Policy: arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
-        - Policy: arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+    ComputeResources:
+      - Name: p5e-nodes            # P5e 노드 그룹
+        InstanceType: p5e.48xlarge # P5e 인스턴스 타입 (8 GPU)
+        MinCount: 0                # 최소 0개 노드
+        MaxCount: 80               # 최대 80개 노드 (ODCR 예약 수량)
+        DisableSimultaneousMultithreading: false  # SMT 유지
+        Efa:
+          Enabled: true            # EFA 네트워킹 활성화
+        CapacityReservationTarget:
+          CapacityReservationId: cr-xxxxxxxxxxxxx  # ODCR 예약 ID
 
     CustomActions:
-      OnNodeConfigured:
-        Script: s3://scripts-jakarta/setup_compute_node.sh
+      OnNodeStart:
+        Script: s3://your-bucket/scripts/node-setup.sh  # 노드 시작 시 실행할 스크립트
+
+Iam:
+  AdditionalIamPolicies:            # 컴퓨트 노드 추가 IAM 정책
+    - Policy: arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess  # S3 읽기 권한
+    - Policy: arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole  # Batch 서비스 역할
 
 SharedStorage:
-  - MountDir: /fsx1
-    Name: fsx-data-1
+  - MountDir: /fsx1                 # 학습 데이터용 FSx
+    Name: fsx-data
     StorageType: FsxLustre
     FsxLustreSettings:
-      StorageCapacity: 14400
-      DeploymentType: PERSISTENT_1
-      StorageType: SSD
-      PerUnitStorageThroughput: 200
-      DataCompressionType: LZ4
-      ImportPath: s3://training-data-jakarta/datasets
-      AutoImportPolicy: NEW_CHANGED
-      BackupRetentionDays: 7
-      AutomaticBackupRetentionDays: 7
-      DailyAutomaticBackupStartTime: "00:00"
+      StorageCapacity: 7200        # 7.2TB 용량
+      DeploymentType: PERSISTENT   # Jakarta 리전은 PERSISTENT만 지원
+      PerUnitStorageThroughput: 1000  # 1000MB/s 처리량
+      DataCompressionType: LZ4     # LZ4 압축 사용
 
-  - MountDir: /fsx2
-    Name: fsx-checkpoint
+  - MountDir: /fsx2                # 체크포인트용 FSx
+    Name: fsx-checkpoints
     StorageType: FsxLustre
     FsxLustreSettings:
-      StorageCapacity: 14400
-      DeploymentType: PERSISTENT_1
-      StorageType: SSD
-      PerUnitStorageThroughput: 200
+      StorageCapacity: 7200        # 7.2TB 용량
+      DeploymentType: PERSISTENT
+      PerUnitStorageThroughput: 1000  # 1000MB/s 처리량
       DataCompressionType: LZ4
-      ExportPath: s3://checkpoint-jakarta
-      AutoExportPolicy: NEW_CHANGED
-      BackupRetentionDays: 7
-      AutomaticBackupRetentionDays: 7
-      DailyAutomaticBackupStartTime: "01:00"
 
-  - MountDir: /fsx3
+  - MountDir: /fsx3                # 로그용 FSx
     Name: fsx-logs
     StorageType: FsxLustre
     FsxLustreSettings:
-      StorageCapacity: 7200
-      DeploymentType: PERSISTENT_1
-      StorageType: SSD
-      PerUnitStorageThroughput: 200
-      BackupRetentionDays: 3
-      AutomaticBackupRetentionDays: 3
-      DailyAutomaticBackupStartTime: "02:00"
-
-  - MountDir: /fsx4
-    Name: fsx-scratch
-    StorageType: FsxLustre
-    FsxLustreSettings:
-      StorageCapacity: 7200
-      DeploymentType: PERSISTENT_1
-      StorageType: SSD
-      PerUnitStorageThroughput: 200
-      BackupRetentionDays: 1
-      AutomaticBackupRetentionDays: 1
-      DailyAutomaticBackupStartTime: "03:00"
+      StorageCapacity: 4800        # 4.8TB 용량
+      DeploymentType: PERSISTENT
+      PerUnitStorageThroughput: 500   # 500MB/s 처리량
+      DataCompressionType: LZ4
 
 Monitoring:
-  DetailedMonitoring: true
+  DetailedMonitoring: true         # EC2 상세 모니터링 활성화
   Logs:
     CloudWatch:
-      Enabled: true
-      RetentionInDays: 30
-    Rotation:
-      Enabled: true
-      RetentionInDays: 15
-  
+      Enabled: true                # CloudWatch 로그 활성화
+      RetentionInDays: 14         # 로그 14일 보관
+
   Dashboards:
     CloudWatch:
-      Enabled: true
+      Enabled: true               # CloudWatch 대시보드 활성화
 
 Tags:
-  - Key: Project
+  - Key: Project                   # 프로젝트 태그
     Value: DistributedTraining
-  - Key: Environment
+  - Key: Environment               # 환경 태그
     Value: Production
-  - Key: Owner
-    Value: YourTeam
 ```
 - 주요 yaml 특징
+
 ```
-1. 컴퓨팅:
-   └── 단일 ComputeResource로 80대 P5e 관리
+1. 컴퓨팅 인프라:
+   ├── 헤드노드: c6i.4xlarge (컴퓨트 최적화)
+   └── 컴퓨트노드: p5e.48xlarge
+       ├── 총 80대 (ODCR)
+       ├── 노드당 8개 H100 GPU
+       └── 총 640개 GPU 사용 가능
 
-2. 스토리지:
-   ├── 훈련 데이터: 14.4TB
-   ├── 체크포인트: 14.4TB
-   ├── 로그: 7.2TB
-   └── 스크래치: 7.2TB
+2. 네트워킹:
+   ├── 헤드노드: 퍼블릭 서브넷
+   ├── 컴퓨트노드: 프라이빗 서브넷
+   ├── EFA 지원 활성화
+   └── 배치그룹 사용 (네트워크 지연 최소화)
 
-3. 네트워킹:
-   ├── EFA 활성화
-   └── 단일 플레이스먼트 그룹
+3. 스토리지 구성:
+   ├── /fsx1: 데이터 (7.2TB, 1000MB/s)
+   ├── /fsx2: 체크포인트 (7.2TB, 1000MB/s)
+   └── /fsx3: 로그 (4.8TB, 500MB/s)
 
-4. 안정성:
-   ├── 자동 백업
-   ├── 헬스체크
-   └── 상세 모니터링
+4. 작업 관리:
+   ├── Slurm 스케줄러
+   ├── 메모리 기반 스케줄링
+   └── 10분 유휴 자동 스케일다운
+
+5. 모니터링/관리:
+   ├── CloudWatch 상세 모니터링
+   ├── GPU 상태 체크
+   └── 14일 로그 보관
 ```
 
 - 2.3 Yaml 검증
@@ -601,87 +534,133 @@ EOF
 - 3.3 중규모 노드 테스트 (10 노드)
   - 3.3.1 위 테스트 반복  
 
-
-
-
-
-
-
-
-
-## 주요 기능
-
-- 다중 GPU 분산 학습 지원
-- NCCL 기반 고성능 통신
-- SLURM 워크로드 관리
-- EFA 네트워킹 최적화
-
-## 개발 환경
-
-- **클라우드**: AWS ParallelCluster
-- **인스턴스**: P5e.48xlarge
-- **OS**: Amazon Linux 2 / Ubuntu
-- **프레임워크**: PyTorch
-- **통신**: NCCL, MPI
-
-## 설치 방법
-
-필요한 패키지 설치
-pip install -r requirements.txt
-
-환경 변수 설정
-export NCCL_DEBUG=INFO
-
-
-## 사용 방법
-단일 노드 실행
-python train.py
-
-분산 학습 실행
-sbatch distributed_train.s
-
-## 프로젝트 구조
+### Phase 4: 프로덕션 트레이닝(예시)
+- 4.1 배치 스크립트
 ```
-ml-training/
-├── train.py # 학습 스크립트
-├── config.yaml # 설정 파일
-├── requirements.txt # 필요 패키지
-└── README.md # 프로젝트 문서
+#!/bin/bash
+
+#SBATCH --job-name=model1-training    # 작업 이름
+#SBATCH --nodes=80                    # 전체 80개 노드 사용
+#SBATCH --ntasks-per-node=8          # 노드당 8개 태스크
+#SBATCH --gres=gpu:8                 # 노드당 8개 GPU
+#SBATCH --cpus-per-task=12           # 태스크당 12개 CPU 코어
+#SBATCH --partition=gpu-queue        
+#SBATCH --output=/fsx3/model1/logs/%j.out  
+#SBATCH --error=/fsx3/model1/logs/%j.err   
+#SBATCH --exclusive                   
+#SBATCH --time=7-00:00:00            
+#SBATCH --container-image=YOUR_ACCOUNT_ID.dkr.ecr.ap-southeast-3.amazonaws.com/my-training
+#SBATCH --container-mounts=/fsx1:/fsx1,/fsx2:/fsx2,/fsx3:/fsx3,/fsx4:/fsx4
+
+# 초기 설정
+set -e
+set -x
+
+# 디렉토리 생성
+mkdir -p /fsx3/model1/logs
+mkdir -p /fsx3/model1/gpu_stats
+
+# EFA/NCCL 환경 설정
+export PATH=$PATH:/opt/amazon/efa/bin
+export LD_LIBRARY_PATH=/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:$LD_LIBRARY_PATH
+
+# EFA 설정
+export FI_PROVIDER=efa
+export FI_EFA_USE_DEVICE_RDMA=1
+export FI_EFA_FORK_SAFE=1
+export FI_EFA_ENABLE_SHM_TRANSFER=1
+
+# NCCL 설정 (80노드 최적화)
+export NCCL_SOCKET_NTHREADS=4
+export NCCL_CROSS_NIC=1
+export NCCL_IFNAME=eth0,eth1,eth2,eth3
+export NCCL_MIN_NCHANNELS=128
+export NCCL_MAX_NCHANNELS=256
+export NCCL_P2P_LEVEL=NVL
+export NCCL_NET_GDR_LEVEL=PHB
+export NCCL_BUFFSIZE=16777216
+export NCCL_P2P_NET_CHUNKSIZE=1048576
+export NCCL_TREE_THRESHOLD=2048
+export NCCL_ALGO=Tree,Ring
+export NCCL_COMM_TIMEOUT_SECONDS=3600
+export NCCL_TUNER_PLUGIN=/opt/aws-ofi-nccl/install/lib/libnccl-ofi-tuner.so
+export NCCL_DEBUG=WARN
+export NCCL_DEBUG_FILE=/fsx3/model1/logs/nccl-rank-%r.log
+
+# MPI 설정
+export OMPI_MCA_pml=^cm,ucx
+export OMPI_MCA_btl=tcp,self
+export OMPI_MCA_btl_tcp_if_exclude=lo,docker0
+
+# PyTorch 분산 설정
+export MASTER_ADDR=$(scontrol show hostname $SLURM_JOB_NODELIST | head -n 1)
+export MASTER_PORT=29500
+export WORLD_SIZE=$SLURM_NTASKS
+export RANK=$SLURM_PROCID
+export LOCAL_RANK=$SLURM_LOCALID
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+# GPU 모니터링 함수
+monitor_gpu() {
+    while true; do
+        nvidia-smi --query-gpu=timestamp,name,utilization.gpu,memory.used,memory.total,temperature.gpu \
+                  --format=csv,noheader \
+        >> /fsx3/model1/gpu_stats/gpu_stats_${SLURM_NODEID}_${SLURM_PROCID}.csv
+        sleep 60
+    done
+}
+
+# 훈련 시작
+echo "=== Training Start ==="
+echo "Start time: $(date)"
+echo "Total nodes: $SLURM_JOB_NUM_NODES"
+echo "GPUs per node: 8"
+echo "Total GPUs: $((SLURM_JOB_NUM_NODES * 8))"
+echo "Master node: $MASTER_ADDR"
+
+# GPU 모니터링 시작
+monitor_gpu &
+MONITOR_PID=$!
+
+# 메인 훈련 실행
+srun python train.py \
+    --data-dir /fsx1/datasets/model1 \
+    --checkpoint-dir /fsx2/model1/checkpoints \
+    --log-dir /fsx3/model1/logs \
+    --output-dir /fsx2/model1/outputs \
+    --model-name model1 \
+    --batch-size 32 \
+    --learning-rate 3e-4 \
+    --epochs 100 \
+    --checkpoint-freq 5 \
+    --distributed-backend nccl
+
+EXIT_CODE=$?
+
+# GPU 모니터링 중지
+kill $MONITOR_PID
+
+# 훈련 완료 처리
+echo "=== Training Complete ==="
+echo "End time: $(date)"
+echo "Exit code: $EXIT_CODE"
+
+# 성공 시 체크포인트 백업
+if [ $EXIT_CODE -eq 0 ] && [ $SLURM_PROCID -eq 0 ]; then
+    echo "Backing up final checkpoint to S3..."
+    aws s3 sync /fsx2/model1/checkpoints/final/ \
+        s3://checkpoint-jakarta/model1/final/ \
+        --region ap-southeast-3
+fi
+
+# 임시 파일 정리
+if [ $SLURM_PROCID -eq 0 ]; then
+    find /fsx4 -name "*.tmp" -type f -mtime +1 -delete
+fi
+
+exit $EXIT_CODE
 ```
 
-## 참고 자료
 
-- [AWS ParallelCluster 문서](https://docs.aws.amazon.com/parallelcluster/)
-- [PyTorch 분산 학습 가이드](https://pytorch.org/tutorials/beginner/dist_overview.html)
 
-## 라이선스
-
-MIT License
-
-웹에서 문서 올리는 방법
-화면에 보이는 편집기에서 바로 작업하시면 됩니다:​
-
-1단계: 파일명 입력
-"Name your file..." 입력란에 README.md 입력
-
-2단계: 내용 작성
-아래 편집 영역에 위의 샘플 내용을 복사하여 붙여넣기
-
-필요에 따라 내용을 수정
-
-3단계: 미리보기 확인
-"Preview" 탭을 클릭하여 작성한 내용이 어떻게 보이는지 확인
-
-4단계: 커밋(저장)
-우측 상단의 "Commit changes..." 버튼 클릭
-
-커밋 메시지 입력 (예: "첫 번째 README 파일 추가")
-
-"Commit changes" 버튼을 눌러 최종 저장​
-
-5단계: 확인
-저장 후 자동으로 레포지토리 메인 페이지로 이동
-
-README.md 파일이 자동으로 화면에 표시됨​
-
-이 방법은 Git 명령어를 전혀 몰라도 웹 브라우저에서 바로 파일을 작성하고 업로드할 수 있는 가장 간단한 방법입니다.​
