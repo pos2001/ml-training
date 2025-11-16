@@ -4,11 +4,12 @@ AWS ParallelCluster 환경에서 대규모 분산 학습을 수행하기 위한 
 
 ## 프로젝트 개요
 
-이 프로젝트는 GPU 클러스터를 활용한 머신러닝 모델 학습을 위한 환경 설정과 코드를 포함합니다.
+이 프로젝트는 GPU 클러스터를 활용한 머신러닝 모델 학습을 위한 샘플 환경 설정과 코드를 포함합니다.
+
 
 ## 사전 고려 사항
 
-## 진행절차
+## 진행절차(end-to-end)
 ### Phase 0: 사전 준비 및 계획(예시)
 - 클러스터 사양 확정
 
@@ -387,7 +388,7 @@ HEAD_NODE_IP=$(pcluster describe-cluster \
     --query "headNode.publicIpAddress" \
     --output text)
 
-# 2. 접속 방법 (두 가지 중 선택)
+# 2. 접속 방법 (세 가지 중 선택)
 
 # 방법 1: pcluster ssh 사용
 pcluster ssh \
@@ -397,7 +398,216 @@ pcluster ssh \
 
 # 방법 2: 일반 ssh 사용
 ssh -i ~/.ssh/p5e-cluster-key.pem ec2-user@$HEAD_NODE_IP
+
+# 방법 3: EC2 콘솔에서 헤드노드를 Session Manager를 통해 접근(가장 간편)
 ```
+
+### Phase 3: 검증 및 테스트(예시)
+- 3.1 기본 시스템 검증
+```
+# 1. SLURM 클러스터 상태 확인
+sinfo
+# 예상 출력:
+# PARTITION AVAIL TIMELIMIT NODES STATE NODELIST
+# gpu-queue    up   infinite     0  idle~  
+# (MinCount가 0이므로 초기에는 노드가 없음)
+
+# 2. FSx Lustre 마운트 확인
+df -h | grep fsx
+# 예상 출력:
+# lustre-xxx  14T  1.1T  13T   8% /fsx1
+# lustre-xxx  14T  1.1T  13T   8% /fsx2
+# lustre-xxx  7.2T  100G  7.1T  2% /fsx3
+# lustre-xxx  7.2T  100G  7.1T  2% /fsx4
+
+# 3. S3 접근 테스트
+aws s3 ls s3://training-data-jakarta/
+# 예상 출력: 버킷 내용 리스트
+```
+
+- 3.2 소규모 노드 테스트 (2 노드)
+  - 3.2.1 2노드 기본 테스트  
+```
+# 1. 테스트 작업 스크립트 생성
+cat > test_2nodes.sh <<'EOF'
+#!/bin/bash
+#SBATCH --job-name=test-2nodes    # 작업 이름
+#SBATCH --nodes=2                 # 2개 노드 요청
+#SBATCH --ntasks-per-node=1       # 노드당 1개 태스크
+#SBATCH --gres=gpu:1             # 노드당 1개 GPU 요청
+#SBATCH --time=00:30:00          # 최대 실행 시간 30분
+#SBATCH --output=/fsx3/logs/test-2nodes-%j.out  # 로그 저장 위치
+
+echo "Node: $(hostname)"
+nvidia-smi
+EOF
+
+# 2. 작업 제출
+sbatch test_2nodes.sh
+
+# 3. 노드 상태 모니터링
+watch -n 10 sinfo
+```
+
+
+     - 3.2.1.1 2노드 기본 테스트 예상 결과
+```
+1. 초기 상태:
+   PARTITION  AVAIL  NODES  STATE
+   gpu-queue   up     0     none
+
+2. 노드 시작 중:
+   PARTITION  AVAIL  NODES  STATE
+   gpu-queue   up     2     alloc+
+
+3. 작업 실행 중:
+   PARTITION  AVAIL  NODES  STATE
+   gpu-queue   up     2     allocated
+
+4. 작업 완료 후:
+   PARTITION  AVAIL  NODES  STATE
+   gpu-queue   up     2     idle~
+```
+  
+  - 3.2.2 2노드 GPU 및 EFA 검증 
+```
+# GPU 및 EFA 검증 스크립트 생성
+cat > validate_gpu_efa.sh <<'EOF'
+#!/bin/bash
+#SBATCH --job-name=validate
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=8
+#SBATCH --gres=gpu:8
+#SBATCH --time=00:30:00
+#SBATCH --output=/fsx3/logs/validate-%j.out
+
+echo "=== GPU Information ==="
+srun nvidia-smi --query-gpu=name,memory.total --format=csv
+
+echo -e "\n=== EFA Status ==="
+srun fi_info -p efa -t FI_EP_RDM
+
+echo -e "\n=== GPUDirect RDMA Status ==="
+srun nvidia-smi nvlink --status
+EOF
+
+# 작업 제출
+sbatch validate_gpu_efa.sh
+
+# 로그 모니터링
+tail -f /fsx3/logs/validate-*.out
+```
+
+  - 3.2.3 2노드 NCCL 테스트
+```
+cat > nccl_test_all.sh <<'EOF'    # 테스트 스크립트 파일 생성
+#!/bin/bash                        # bash 스크립트 선언
+
+#SBATCH --job-name=nccl-test-all  # Slurm 작업 이름
+#SBATCH --nodes=2                  # 2개 노드 사용
+#SBATCH --ntasks-per-node=8       # 노드당 8개 태스크 (GPU당 1개)
+#SBATCH --gres=gpu:8              # 노드당 8개 GPU 요청
+#SBATCH --time=01:00:00           # 최대 실행 시간 1시간
+#SBATCH --output=/fsx3/logs/nccl-test-%j.out  # 로그 파일 위치
+
+# NCCL 환경변수 설정
+export FI_PROVIDER=efa              # EFA 네트워크 사용
+export FI_EFA_USE_DEVICE_RDMA=1    # EFA RDMA 활성화
+export FI_EFA_FORK_SAFE=1          # Fork 안전성 보장
+export NCCL_SOCKET_NTHREADS=4      # 소켓 통신 쓰레드 수
+export NCCL_CROSS_NIC=1            # 다중 NIC 사용
+export NCCL_MIN_NCHANNELS=32       # 최소 통신 채널 수
+export NCCL_MAX_NCHANNELS=64       # 최대 통신 채널 수
+export NCCL_P2P_LEVEL=NVL          # NVLink 통신 활성화
+export NCCL_NET_GDR_LEVEL=PHB      # GPUDirect RDMA 설정
+export NCCL_BUFFSIZE=8388608       # 통신 버퍼 크기
+export NCCL_P2P_NET_CHUNKSIZE=524288  # P2P 청크 크기
+export NCCL_DEBUG=INFO             # 디버그 정보 출력
+
+# 테스트할 collective operations 배열 정의
+TESTS=(
+    "all_reduce_perf"              # 그래디언트 평균 계산 테스트
+    "all_gather_perf"              # 배치 데이터 공유 테스트
+    "broadcast_perf"               # 파라미터 동기화 테스트
+    "reduce_perf"                  # 손실 값 집계 테스트
+    "reduce_scatter_perf"          # 샤딩된 그래디언트 처리 테스트
+    "alltoall_perf"               # 피처 재분배 테스트
+)
+
+# 각 테스트 순차적 실행
+for test in "${TESTS[@]}"; do
+    echo "=== Starting $test ==="  # 테스트 시작 표시
+    echo "Date: $(date)"           # 시작 시간 기록
+    
+    srun --mpi=pmix /opt/nccl-tests/build/$test \  # MPI로 테스트 실행
+        -b 8 -e 4G -f 2 -g 1 -n 50                 # 테스트 파라미터
+        # -b 8: 시작 크기 8B
+        # -e 4G: 최대 크기 4GB
+        # -f 2: 2배수로 증가
+        # -g 1: GPU당 1프로세스
+        # -n 50: 50회 반복
+    
+    echo "=== Completed $test ===" # 테스트 완료 표시
+    echo
+done
+EOF
+
+sbatch --wait nccl_test_all.sh     # 작업 제출 및 완료 대기
+```
+
+  - 3.2.4 2노드 FSx for Lustre 성능 테스트
+   ```
+cat > test_fsx_performance.sh <<'EOF'
+#!/bin/bash
+#SBATCH --job-name=fsx-test
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:30:00
+#SBATCH --output=/fsx3/logs/fsx-test-%j.out
+
+echo "=== Starting FSx Performance Tests ==="
+date
+
+# 테스트할 FSx 마운트 포인트들
+FSX_MOUNTS=("/fsx1" "/fsx2" "/fsx3" "/fsx4")
+
+for mount in "${FSX_MOUNTS[@]}"; do
+    echo "=== Testing $mount ==="
+    
+    # 기본 파일시스템 정보
+    echo "Mount info:"
+    df -h $mount
+    
+    # IOR 순차 읽기/쓰기 테스트
+    echo "Sequential I/O test:"
+    srun ior -a POSIX -w -r \
+        -o ${mount}/ior_test \
+        -t 1m -b 16m -s 100 -F
+    
+    # mdtest 메타데이터 테스트
+    echo "Metadata test:"
+    srun mdtest -n 1000 -d ${mount}/mdtest
+    
+    echo "=== Completed testing $mount ==="
+    echo
+done
+
+echo "=== All FSx tests completed ==="
+date
+EOF
+```
+
+
+- 3.3 중규모 노드 테스트 (10 노드)
+  - 3.3.1 위 테스트 반복  
+
+
+
+
+
+
+
+
 
 ## 주요 기능
 
