@@ -663,4 +663,183 @@ exit $EXIT_CODE
 ```
 
 
+# Q&A
+## YAML 파일 자체에서는 FSx Lustre의 디렉토리 구조를 사전 정의할 수 있는지?
+- A: YAML 파일 자체에서는 FSx Lustre의 디렉토리 구조를 사전 정의할 수 없습니다. 대신 두 가지 접근 방법이 있습니다:
+```
+1. CustomActions 사용:
+   HeadNode:
+     CustomActions:
+       OnNodeConfigured:
+         Script: s3://your-bucket/scripts/setup_dirs.sh
 
+2. 각 FSx 마운트 포인트에 용도별 구분:
+   SharedStorage:
+     - MountDir: /fsx1          # 데이터셋용
+       Name: fsx-data
+       ...
+     
+     - MountDir: /fsx2          # 체크포인트용
+       Name: fsx-checkpoints
+       ...
+     
+     - MountDir: /fsx3          # 로그용
+       Name: fsx-logs
+       ...
+```
+```
+/fsx2/                    # 체크포인트용 FSx
+├── model1/
+│   ├── checkpoints/
+│   └── outputs/
+├── model2/
+│   ├── checkpoints/
+│   └── outputs/
+...
+└── model7/
+    ├── checkpoints/
+    └── outputs/
+```
+
+```
+# setup_dirs.sh
+#!/bin/bash
+
+# 로그 파일 설정
+LOGFILE="/var/log/parallelcluster/setup_dirs.log"
+mkdir -p /var/log/parallelcluster
+exec 1> >(tee -a "$LOGFILE") 2>&1
+
+echo "Starting directory setup at $(date)"
+
+# FSx 마운트 포인트가 준비될 때까지 대기
+echo "Checking FSx mount points..."
+for i in {1..30}; do  # 최대 5분 대기 (10초 × 30)
+    if mountpoint -q /fsx1 && mountpoint -q /fsx2 && mountpoint -q /fsx3; then
+        echo "All FSx mount points are ready"
+        break
+    fi
+    echo "Waiting for FSx mount points... Attempt $i/30"
+    sleep 10
+done
+
+# 마운트 상태 최종 확인
+if ! mountpoint -q /fsx1 || ! mountpoint -q /fsx2 || ! mountpoint -q /fsx3; then
+    echo "Error: FSx mount points not ready after timeout"
+    exit 1
+fi
+
+# FSx 마운트 정보 기록
+echo "FSx mount details:"
+df -h | grep fsx
+
+# 디렉토리 구조 생성
+echo "Creating directory structure..."
+
+# 데이터셋 디렉토리 (/fsx1)
+mkdir -p /fsx1/datasets
+chmod 775 /fsx1/datasets
+
+# 모델별 디렉토리 생성 (/fsx2, /fsx3)
+for i in {1..7}; do
+    # 체크포인트 및 출력 디렉토리
+    mkdir -p /fsx2/model${i}/{checkpoints,outputs}
+    chmod -R 775 /fsx2/model${i}
+
+    # 로그 디렉토리
+    mkdir -p /fsx3/model${i}/{training_logs,tensorboard}
+    chmod -R 775 /fsx3/model${i}
+done
+
+# 소유권 설정
+echo "Setting ownership..."
+chown -R ec2-user:ec2-user /fsx1
+chown -R ec2-user:ec2-user /fsx2
+chown -R ec2-user:ec2-user /fsx3
+
+# 디렉토리 구조 확인
+echo "Created directory structure:"
+echo "FSx1 (datasets):"
+tree -L 2 /fsx1
+echo "FSx2 (checkpoints/outputs):"
+tree -L 3 /fsx2
+echo "FSx3 (logs):"
+tree -L 3 /fsx3
+
+echo "Directory setup completed at $(date)"
+
+# 권한 확인
+echo "Verifying permissions..."
+ls -la /fsx1
+ls -la /fsx2
+ls -la /fsx3
+
+echo "Setup completed successfully"
+```
+
+```
+# 각 모델을 훈련시킬 때 SLURM 스크립트에서 고유한 체크포인트 경로를 지정
+#!/bin/bash
+#SBATCH --job-name=model1_training
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --gres=gpu:8
+#SBATCH --partition=gpu-queue
+
+# 모델별 디렉토리 설정
+MODEL_ID=1
+CHECKPOINT_DIR="/fsx2/model${MODEL_ID}/checkpoints"
+OUTPUT_DIR="/fsx2/model${MODEL_ID}/outputs"
+LOG_DIR="/fsx3/model${MODEL_ID}/training_logs"
+TENSORBOARD_DIR="/fsx3/model${MODEL_ID}/tensorboard"
+
+# 훈련 데이터 경로
+DATA_DIR="/fsx1/datasets"
+
+# 분산 훈련 실행
+srun python train.py \
+    --checkpoint-dir ${CHECKPOINT_DIR} \
+    --output-dir ${OUTPUT_DIR} \
+    --log-dir ${LOG_DIR} \
+    --tensorboard-dir ${TENSORBOARD_DIR} \
+    --data-dir ${DATA_DIR} \
+    --model-name "model${MODEL_ID}"
+```
+
+## 하나의 클러스터에 여러개의 모델을 훈련시킬 때PARALLELCLUSTER YAML 파일 입장에서 고려해야할 사항은?
+- A: 메모리 기반 스케줄링 활성화
+-   여러 작업이 동일한 노드를 공유할 수 있도록 메모리 기반 스케줄링을 활성화
+```
+Scheduling:
+  Scheduler: slurm                    # Slurm 스케줄러 사용
+  SlurmSettings:
+    EnableMemoryBasedScheduling: true # 메모리 기반 스케줄링 활성화 (GPU 공유 가능)
+    ScaledownIdletime: 10            # 10분 유휴 후 스케일다운
+```
+
+```
+# 이 설정이 없으면 작업이 GPU 일부만 사용하더라도 전체 노드를 점유
+활용 시나리오:
+1. 효율적인 리소스 관리:
+   ├── 대규모 모델: 여러 GPU/노드 사용
+   ├── 중소형 모델: GPU 일부만 사용
+   └── 동시에 여러 실험/모델 학습 가능
+
+2. 리소스 최적화:
+   예시 1) 노드 당 작업 분할
+   ├── 대형 모델A: 4 GPU
+   └── 중형 모델B: 4 GPU
+   
+   예시 2) 다양한 구성
+   ├── 노드1: 모델A(8 GPU)
+   ├── 노드2: 모델B(4 GPU) + 모델C(4 GPU)
+   └── 노드3: 모델D(2 GPU) + 모델E(3 GPU) + 모델F(3 GPU)
+```
+
+## 분산 트레이닝에서 스토리지 정책은?
+- 원본 훈련 데이터셋
+- 체크 포인트
+- 모델 가중치
+- 옵티마이저 선택
+- 로그 및 메트릭
+- 중간 결과 및 임시 파일
