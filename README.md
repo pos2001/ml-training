@@ -113,21 +113,21 @@ echo "All operations completed successfully"
 ```
 
 ### Phase 1: 인프라 구축 (예시)
-- VPC 및 네트워크 생성
+- 1.1 VPC 및 네트워크 생성
   - VPC 생성
   - 서브네 생성
   - 인터넷 게이트웨이 및 NAT 게이트웨이
   - 라우팅 테이블 설정
-- SG 설정
+- 1.2 SG 설정
   - 헤드 노드와 컴퓨트 노드간 통신
   - 헤드 노드 SSH 접속용
   - Grafana 접근용 SG(설치한다면)
-- 키페어 설정(헤드 노드 접속용)
+- 1.3 키페어 설정(헤드 노드 접속용)
 
 ### Phase 2: 클러스터 배포(예시)
-- ParallelCluster 설치(최신 버전 권장)
+- 2.1 ParallelCluster 설치(최신 버전 권장)
   -  https://github.com/aws/aws-parallelcluster/releases
-  -  Yaml 설정 파일 작성
+- 2.2 Yaml 설정 파일 작성
 ```
 Region: ap-southeast-3
 
@@ -318,7 +318,7 @@ Tags:
   - Key: Owner
     Value: YourTeam
 ```
-- 주요 특징
+- 주요 yaml 특징
 ```
 1. 컴퓨팅:
    └── 단일 ComputeResource로 80대 P5e 관리
@@ -337,6 +337,66 @@ Tags:
    ├── 자동 백업
    ├── 헬스체크
    └── 상세 모니터링
+```
+
+- 2.3 Yaml 검증
+```
+# 1. YAML 문법과 설정 검증
+pcluster configure --config cluster-config.yaml
+
+# 2. 클러스터 생성 시뮬레이션 (실제 생성하지 않음)
+pcluster create-cluster \
+    --cluster-name p5e-80node-cluster \
+    --cluster-configuration cluster-config.yaml \
+    --region ap-southeast-3 \
+    --dryrun
+```
+- 2.4 클러스터 생성
+```
+# 클러스터 생성 (30-60분 소요)
+pcluster create-cluster \
+--cluster-name p5e-80node-cluster \
+--cluster-configuration cluster-config.yaml \
+--region ap-southeast-3
+# 실시간 상태 확인
+watch -n 10 'pcluster describe-cluster \
+--cluster-name p5e-80node-cluster \
+--region ap-southeast-3 \
+--query "clusterStatus"'
+```
+```
+# 클러스터 생성 명령어 설명
+1. 클러스터 생성:
+   ├── 30-60분 소요
+   └── 백그라운드 실행
+
+2. 상태 모니터링:
+   ├── watch 명령어로 실시간 확인
+   ├── 10초 간격 갱신
+   └── 가능한 상태값:
+       ├── CREATE_IN_PROGRESS
+       ├── CREATE_COMPLETE
+       └── CREATE_FAILED
+```
+- 2.5 헤드 노드 접속
+```
+# 1. 헤드노드 IP 확인
+HEAD_NODE_IP=$(pcluster describe-cluster \
+    --cluster-name p5e-80node-cluster \
+    --region ap-southeast-3 \
+    --query "headNode.publicIpAddress" \
+    --output text)
+
+# 2. 접속 방법 (두 가지 중 선택)
+
+# 방법 1: pcluster ssh 사용
+pcluster ssh \
+    --cluster-name p5e-80node-cluster \
+    --region ap-southeast-3 \
+    -i ~/.ssh/p5e-cluster-key.pem
+
+# 방법 2: 일반 ssh 사용
+ssh -i ~/.ssh/p5e-cluster-key.pem ec2-user@$HEAD_NODE_IP
 ```
 
 ## 주요 기능
