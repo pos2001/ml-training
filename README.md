@@ -194,7 +194,6 @@ SlurmQueues:
 Iam:
   AdditionalIamPolicies:            # 컴퓨트 노드 추가 IAM 정책
     - Policy: arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess  # S3 읽기 권한
-    - Policy: arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole  # Batch 서비스 역할
 
 SharedStorage:
   - MountDir: /fsx1                 # 학습 데이터용 FSx
