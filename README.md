@@ -130,114 +130,133 @@ echo "All operations completed successfully"
   -  https://github.com/aws/aws-parallelcluster/releases
 - 2.2 Yaml 설정 파일 작성
 ```
-Region: ap-southeast-3                # 자카르타 리전 지정
+Region: ap-southeast-3                # AWS 리전 지정 (자카르타)
+Version: 3.7.0                        # ParallelCluster 버전
 
 Image:
-  Os: alinux2                        # Amazon Linux 2 운영체제
+  Os: alinux2                        # Amazon Linux 2 OS 선택 (AWS 최적화 OS)
 
-HeadNode:
-  InstanceType: c6i.4xlarge          # 헤드노드용 컴퓨트 최적화 인스턴스
-  Networking:
-    SubnetId: subnet-xxxxxxxxx       # 헤드노드용 퍼블릭 서브넷
+HeadNode:                            # 클러스터 관리 노드 설정
+  InstanceType: c6i.4xlarge          # 헤드노드 인스턴스 타입 (16vCPU, 32GB 메모리)
+  Networking:                        # 네트워크 설정
+    SubnetId: subnet-xxxxxxxxx       # 퍼블릭 서브넷 ID (외부 접속 가능)
+    SecurityGroups:                  # 보안 그룹 설정
+      - sg-zzzzzzzzz                # 헤드노드용 보안그룹 ID
   Ssh:
-    KeyName: your-keypair-name       # SSH 접속용 키페어
-  Iam:
-    AdditionalIamPolicies:           # 헤드노드 추가 IAM 정책
-      - Policy: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # SSM 접속용
+    KeyName: your-keypair-name       # SSH 접속용 키페어 이름
+  Iam:                              # IAM 권한 설정
+    AdditionalIamPolicies:          # 추가 IAM 정책
+      - Policy: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # Systems Manager 접속용
+      - Policy: arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy  # CloudWatch 로그 수집용
+  LocalStorage:                      # 로컬 스토리지 설정
+    RootVolume:                     # 루트 볼륨 설정
+      Size: 200                     # 볼륨 크기 (GB)
+      VolumeType: gp3              # SSD 볼륨 타입
+      Iops: 16000                  # 초당 I/O 작업 수
+      Throughput: 1000             # 처리량 (MB/s)
 
-Scheduling:
-  Scheduler: slurm                   # Slurm 스케줄러 사용
-  ScalingStrategy: best-effort       # 최선노력 스케일링 전략
-  SlurmSettings:
-    ScaledownIdletime: 10           # 10분 유휴 후 스케일다운
+Scheduling:                         # 작업 스케줄링 설정
+  Scheduler: slurm                  # Slurm 스케줄러 사용 (HPC 작업 관리)
+  ScalingStrategy: best-effort      # 최선노력 기반 스케일링
+  SlurmSettings:                    # Slurm 세부 설정
+    ScaledownIdletime: 10          # 유휴시간 후 노드 종료 (분)
+    QueueUpdateStrategy: DRAIN      # 작업 종료 후 노드 정리 방식
+    EnableMemoryBasedScheduling: true  # 메모리 기반 스케줄링 활성화
 
-
-SlurmQueues:
-  - Name: gpu-queue                  # GPU 작업 전용 큐
+SlurmQueues:                        # Slurm 작업 큐 설정
+  - Name: gpu-queue                 # GPU 작업 전용 큐 이름
     CapacityType: ONDEMAND          # 온디맨드 인스턴스 사용
-    AllocationStrategy: lowest-price # 최저가 할당 전략
-    ComputeSettings:
-      LocalStorage:
-        RootVolume:                  # 컴퓨트 노드 루트 볼륨 설정
-          Size: 200                  # 200GB 크기
-          VolumeType: gp3           # gp3 타입 사용
-          Iops: 16000               # 16000 IOPS
-          Throughput: 1000          # 1000 MB/s 처리량
-    
-    Networking:
-      SubnetIds:
-        - subnet-yyyyyyyyy          # 컴퓨트 노드용 프라이빗 서브넷
-      PlacementGroup:
-        Enabled: true               # 네트워크 성능 최적화를 위한 배치 그룹
-      SecurityGroups:
-        - sg-zzzzzzzzz             # 컴퓨트 노드 보안 그룹
+    AllocationStrategy: lowest-price # 최저가 인스턴스 선택 전략
+    ComputeSettings:                # 컴퓨트 노드 설정
+      LocalStorage:                 # 컴퓨트 노드 스토리지 설정
+        RootVolume:                # 루트 볼륨 설정
+          Size: 200                # 볼륨 크기 (GB)
+          VolumeType: gp3         # SSD 볼륨 타입
+          Iops: 16000             # 초당 I/O 작업 수
+          Throughput: 1000        # 처리량 (MB/s)
+    Networking:                    # 컴퓨트 노드 네트워크 설정
+      SubnetIds:                  # 서브넷 설정
+        - subnet-yyyyyyyyy        # 프라이빗 서브넷 ID
+      PlacementGroup:            # 배치 그룹 설정
+        Enabled: true            # 네트워크 성능 최적화를 위한 배치 그룹 활성화
+      SecurityGroups:            # 보안 그룹 설정
+        - sg-zzzzzzzzz          # 컴퓨트 노드용 보안그룹 ID
+    HealthChecks:                # 상태 확인 설정
+      Gpu:                      # GPU 상태 확인
+        Enabled: true          # GPU 상태 모니터링 활성화
+    ComputeResources:           # 컴퓨트 리소스 설정
+      - Name: p5e-nodes        # 노드 그룹 이름
+        InstanceType: p5e.48xlarge  # GPU 인스턴스 타입 (48xlarge = 8 GPU)
+        MinCount: 0            # 최소 노드 수
+        MaxCount: 80           # 최대 노드 수
+        DisableSimultaneousMultithreading: false  # SMT 비활성화 여부
+        Efa:                   # EFA(Elastic Fabric Adapter) 설정
+          Enabled: true       # 고성능 네트워킹 활성화
+          GdrSupport: ENABLED # GPU Direct RDMA 지원 활성화
+        CapacityReservationTarget:  # 용량 예약 설정
+          CapacityReservationId: cr-xxxxxxxxxxxxx  # 용량 예약 ID
+    CustomActions:              # 사용자 정의 작업
+      OnNodeStart:             # 노드 시작 시 실행할 스크립트
+        Script: s3://your-bucket/scripts/node-setup.sh
+      OnNodeConfigured:        # 노드 구성 완료 시 실행할 스크립트
+        Script: s3://your-bucket/scripts/node-configured.sh
+    Iam:                       # 컴퓨트 노드 IAM 설정
+      AdditionalIamPolicies:   # 추가 IAM 정책
+        - Policy: arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess  # S3 읽기 권한
+        - Policy: arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy  # CloudWatch 로그 수집
 
-    HealthChecks:
-      Gpu:
-        Enabled: true              # GPU 상태 모니터링 활성화
+SharedStorage:                 # 공유 스토리지 설정
+  - MountDir: /fsx1          # 마운트 위치 (학습 데이터용)
+    Name: fsx-data          # 스토리지 이름
+    StorageType: FsxLustre  # FSx for Lustre 타입
+    FsxLustreSettings:      # Lustre 설정
+      StorageCapacity: 7200 # 용량 (GB)
+      DeploymentType: PERSISTENT_2  # 영구 배포 타입
+      PerUnitStorageThroughput: 1000  # 처리량 (MB/s)
+      DataCompressionType: LZ4  # 데이터 압축 방식
+      AutoImportPolicy: NEW    # 새 파일 자동 임포트
+      DriveCacheType: READ    # 드라이브 캐시 타입
 
-    ComputeResources:
-      - Name: p5e-nodes            # P5e 노드 그룹
-        InstanceType: p5e.48xlarge # P5e 인스턴스 타입 (8 GPU)
-        MinCount: 0                # 최소 0개 노드
-        MaxCount: 80               # 최대 80개 노드 (ODCR 예약 수량)
-        DisableSimultaneousMultithreading: false  # SMT 유지
-        Efa:
-          Enabled: true            # EFA 네트워킹 활성화
-        CapacityReservationTarget:
-          CapacityReservationId: cr-xxxxxxxxxxxxx  # ODCR 예약 ID
+  - MountDir: /fsx2         # 마운트 위치 (체크포인트용)
+    Name: fsx-checkpoints   # 스토리지 이름
+    StorageType: FsxLustre  # FSx for Lustre 타입
+    FsxLustreSettings:      # Lustre 설정
+      StorageCapacity: 7200 # 용량 (GB)
+      DeploymentType: PERSISTENT_2  # 영구 배포 타입
+      PerUnitStorageThroughput: 1000  # 처리량 (MB/s)
+      DataCompressionType: LZ4  # 데이터 압축 방식
+      AutoImportPolicy: NEW    # 새 파일 자동 임포트
+      DriveCacheType: READ    # 드라이브 캐시 타입
 
-    CustomActions:
-      OnNodeStart:
-        Script: s3://your-bucket/scripts/node-setup.sh  # 노드 시작 시 실행할 스크립트
+  - MountDir: /fsx3         # 마운트 위치 (로그용)
+    Name: fsx-logs         # 스토리지 이름
+    StorageType: FsxLustre # FSx for Lustre 타입
+    FsxLustreSettings:     # Lustre 설정
+      StorageCapacity: 4800  # 용량 (GB)
+      DeploymentType: PERSISTENT_2  # 영구 배포 타입
+      PerUnitStorageThroughput: 500  # 처리량 (MB/s)
+      DataCompressionType: LZ4  # 데이터 압축 방식
+      AutoImportPolicy: NEW    # 새 파일 자동 임포트
+      DriveCacheType: READ    # 드라이브 캐시 타입
 
-Iam:
-  AdditionalIamPolicies:            # 컴퓨트 노드 추가 IAM 정책
-    - Policy: arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess  # S3 읽기 권한
+Monitoring:                   # 모니터링 설정
+  DetailedMonitoring: true   # EC2 상세 모니터링 활성화
+  Logs:                      # 로그 설정
+    CloudWatch:              # CloudWatch 로그
+      Enabled: true         # 활성화
+      RetentionInDays: 14   # 로그 보관 기간 (일)
+  Dashboards:               # 대시보드 설정
+    CloudWatch:             # CloudWatch 대시보드
+      Enabled: true        # 활성화
 
-SharedStorage:
-  - MountDir: /fsx1                 # 학습 데이터용 FSx
-    Name: fsx-data
-    StorageType: FsxLustre
-    FsxLustreSettings:
-      StorageCapacity: 7200        # 7.2TB 용량
-      DeploymentType: PERSISTENT   # Jakarta 리전은 PERSISTENT만 지원
-      PerUnitStorageThroughput: 1000  # 1000MB/s 처리량
-      DataCompressionType: LZ4     # LZ4 압축 사용
+DevSettings:                # 개발 설정
+  Timeouts:                # 타임아웃 설정
+    HeadNodeBootstrapTimeout: 3600  # 헤드노드 부트스트랩 타임아웃 (초)
 
-  - MountDir: /fsx2                # 체크포인트용 FSx
-    Name: fsx-checkpoints
-    StorageType: FsxLustre
-    FsxLustreSettings:
-      StorageCapacity: 7200        # 7.2TB 용량
-      DeploymentType: PERSISTENT
-      PerUnitStorageThroughput: 1000  # 1000MB/s 처리량
-      DataCompressionType: LZ4
-
-  - MountDir: /fsx3                # 로그용 FSx
-    Name: fsx-logs
-    StorageType: FsxLustre
-    FsxLustreSettings:
-      StorageCapacity: 4800        # 4.8TB 용량
-      DeploymentType: PERSISTENT
-      PerUnitStorageThroughput: 500   # 500MB/s 처리량
-      DataCompressionType: LZ4
-
-Monitoring:
-  DetailedMonitoring: true         # EC2 상세 모니터링 활성화
-  Logs:
-    CloudWatch:
-      Enabled: true                # CloudWatch 로그 활성화
-      RetentionInDays: 14         # 로그 14일 보관
-
-  Dashboards:
-    CloudWatch:
-      Enabled: true               # CloudWatch 대시보드 활성화
-
-Tags:
-  - Key: Project                   # 프로젝트 태그
+Tags:                      # 리소스 태그
+  - Key: Project          # 프로젝트 태그
     Value: DistributedTraining
-  - Key: Environment               # 환경 태그
+  - Key: Environment      # 환경 태그
     Value: Production
 ```
 - 주요 yaml 특징
