@@ -293,10 +293,11 @@ Tags:                      # 리소스 태그
 
 - 2.3 Yaml 검증
 ```
-# 1. YAML 문법과 설정 검증
+# 1. YAML 문법과 설정 검증(YAML 파일의 문법 오류 검사, 설정값의 유효성 검사, 필수 파라미터 누락 여부 확인)
 pcluster configure --config cluster-config.yaml
 
-# 2. 클러스터 생성 시뮬레이션 (실제 생성하지 않음)
+# 2. 클러스터 생성 시뮬레이션 (실제 생성하지 않고 시물레이션 만 수행, AWS 리소스 생성 가능 여부 확인, 권한 문제 사전 확인 등)
+: 이러한 사전 검증을 거치지 않으면, 생성 시도 후 다시 클러스터 삭제하는데 많은 시간 및 비용 소모
 pcluster create-cluster \
     --cluster-name p5e-80node-cluster \
     --cluster-configuration cluster-config.yaml \
@@ -305,7 +306,7 @@ pcluster create-cluster \
 ```
 - 2.4 클러스터 생성
 ```
-# 클러스터 생성 (30-60분 소요)
+# 클러스터 생성 
 pcluster create-cluster \
 --cluster-name p5e-80node-cluster \
 --cluster-configuration cluster-config.yaml \
