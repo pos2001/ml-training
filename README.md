@@ -119,10 +119,10 @@ echo "All operations completed successfully"
   - 서브네 생성
   - 인터넷 게이트웨이 및 NAT 게이트웨이
   - 라우팅 테이블 설정
-- 1.2 SG 설정
+- 1.2 Security Group 설정
   - 헤드 노드와 컴퓨트 노드간 통신
   - 헤드 노드 SSH 접속용
-  - Grafana 접근용 SG(설치한다면)
+  - Grafana 접근용 SG(Grafana 설치한다면)
 - 1.3 키페어 설정(헤드 노드 접속용)
 
 ### Phase 2: 클러스터 배포(예시)
@@ -320,7 +320,7 @@ watch -n 10 'pcluster describe-cluster \
 ```
 # 클러스터 생성 명령어 설명
 1. 클러스터 생성:
-   ├── 30-60분 소요
+   ├── 수 십여분 소요
    └── 백그라운드 실행
 
 2. 상태 모니터링:
@@ -378,7 +378,12 @@ aws s3 ls s3://training-data-jakarta/
 ```
 
 - 3.2 소규모 노드 테스트 (2 노드)
-  - 3.2.1 2노드 기본 테스트  
+  - 3.2.1 2 노드 기본 동작 테스트
+    - 테스트 목적: 클러스터 기본 기능 검증
+      - 노드 프로비저닝 작동 확인
+      - Slurm 스케줄러 작동 확인
+      -  GPU 할당 확인 
+   
 ```
 # 1. 테스트 작업 스크립트 생성
 cat > test_2nodes.sh <<'EOF'
@@ -401,8 +406,8 @@ sbatch test_2nodes.sh
 watch -n 10 sinfo
 ```
 
+     - 2 노드 기본 테스트 예상 결과
 
-     - 3.2.1.1 2노드 기본 테스트 예상 결과
 ```
 1. 초기 상태:
    PARTITION  AVAIL  NODES  STATE
@@ -421,7 +426,8 @@ watch -n 10 sinfo
    gpu-queue   up     2     idle~
 ```
   
-  - 3.2.2 2노드 GPU 및 EFA 검증 
+  - 3.2.2 2 노드 GPU 및 EFA 검증
+    - GPU와 EFA(Elastic Fabric Adapter) 네트워크의 상태를 종합적으로 검증
 ```
 # GPU 및 EFA 검증 스크립트 생성
 cat > validate_gpu_efa.sh <<'EOF'
@@ -433,12 +439,15 @@ cat > validate_gpu_efa.sh <<'EOF'
 #SBATCH --time=00:30:00
 #SBATCH --output=/fsx3/logs/validate-%j.out
 
+# # GPU 정보 수집
 echo "=== GPU Information ==="
 srun nvidia-smi --query-gpu=name,memory.total --format=csv
 
+# # EFA 상태 확인
 echo -e "\n=== EFA Status ==="
 srun fi_info -p efa -t FI_EP_RDM
 
+# # NVLink 상태 확인
 echo -e "\n=== GPUDirect RDMA Status ==="
 srun nvidia-smi nvlink --status
 EOF
@@ -450,7 +459,12 @@ sbatch validate_gpu_efa.sh
 tail -f /fsx3/logs/validate-*.out
 ```
 
-  - 3.2.3 2노드 NCCL 테스트
+
+
+
+  - 3.2.3 2 노드 NCCL 테스트
+    - NCCL(NVIDIA Collective Communications Library)의 다양한 분산 통신 패턴들의 성능을 검증하는 종합 테스트
+    - 이 스크립트는 6개의 다른 NCCL 통신 패턴을 순차적으로 테스트하며, 각각의 결과가 출력
 ```
 cat > nccl_test_all.sh <<'EOF'    # 테스트 스크립트 파일 생성
 #!/bin/bash                        # bash 스크립트 선언
@@ -507,7 +521,7 @@ EOF
 sbatch --wait nccl_test_all.sh     # 작업 제출 및 완료 대기
 ```
 
-  - 3.2.4 2노드 FSx for Lustre 성능 테스트
+  - 3.2.4 2 노드 FSx for Lustre 성능 테스트
    ```
 cat > test_fsx_performance.sh <<'EOF'
 #!/bin/bash
@@ -685,14 +699,19 @@ exit $EXIT_CODE
 # Q&A
 ## YAML 파일 자체에서는 FSx Lustre의 디렉토리 구조를 사전 정의할 수 있는지?
 - A: YAML 파일 자체에서는 FSx Lustre의 디렉토리 구조를 사전 정의할 수 없습니다. 대신 두 가지 접근 방법이 있습니다:
+- 이렇게 구성하면 FSx 스토리지 생성과 디렉토리 구조 설정이 클러스터 생성 시 자동생성
 ```
 1. CustomActions 사용:
+# 장점: 클러스터 생성되었을 때 자동으로 사용자가 원하는 스토리지 구조를 만드는 것이 가능
+# 단점: 설치에 너무 많은 시간이 소요되어 HeadNodeWaitCondition 타임 아웃 발생 가능성 존재, 설정 에러
    HeadNode:
      CustomActions:
        OnNodeConfigured:
          Script: s3://your-bucket/scripts/setup_dirs.sh
 
 2. 각 FSx 마운트 포인트에 용도별 구분:
+# 장점: 상대적으로 빠르게 클러스터 생성 가능, 구성 단순, 설정 실패 위험 감소
+# 단점: 스토리지 구조는 클러스터 생성 후 수동으로 설정해야 함 
    SharedStorage:
      - MountDir: /fsx1          # 데이터셋용
        Name: fsx-data
@@ -706,18 +725,39 @@ exit $EXIT_CODE
        Name: fsx-logs
        ...
 ```
+
 ```
-/fsx2/                    # 체크포인트용 FSx
+# 이런 FSx for Lustre 스토리지 정책을 원한다면, 아래 스크립트 파일 사용
+
+/fsx1/
+├── shared_datasets/     # 공유 데이터셋
+└── model1/
+    ├── raw_data/       # 원본 데이터
+    ├── processed_data/ # 전처리 데이터
+    ├── cache/         # 캐시
+    └── temp/          # 임시 데이터
+└── model2/
+    ...
+
+/fsx2/
 ├── model1/
 │   ├── checkpoints/
+│   │   ├── latest/
+│   │   └── archive/
 │   └── outputs/
-├── model2/
-│   ├── checkpoints/
-│   └── outputs/
-...
-└── model7/
-    ├── checkpoints/
-    └── outputs/
+│       ├── eval/
+│       └── predictions/
+└── model2/
+    ...
+
+/fsx3/
+├── model1/
+│   ├── training_logs/
+│   ├── tensorboard/
+│   ├── metrics/
+│   └── debug/
+└── model2/
+    ...
 ```
 
 ```
@@ -728,7 +768,6 @@ exit $EXIT_CODE
 LOGFILE="/var/log/parallelcluster/setup_dirs.log"
 mkdir -p /var/log/parallelcluster
 exec 1> >(tee -a "$LOGFILE") 2>&1
-
 echo "Starting directory setup at $(date)"
 
 # FSx 마운트 포인트가 준비될 때까지 대기
@@ -755,19 +794,28 @@ df -h | grep fsx
 # 디렉토리 구조 생성
 echo "Creating directory structure..."
 
-# 데이터셋 디렉토리 (/fsx1)
-mkdir -p /fsx1/datasets
-chmod 775 /fsx1/datasets
+# FSx1 (데이터셋) 구조 생성
+echo "Setting up FSx1 (datasets)..."
+mkdir -p /fsx1/shared_datasets
+chmod 755 /fsx1/shared_datasets
 
-# 모델별 디렉토리 생성 (/fsx2, /fsx3)
 for i in {1..7}; do
-    # 체크포인트 및 출력 디렉토리
-    mkdir -p /fsx2/model${i}/{checkpoints,outputs}
-    chmod -R 775 /fsx2/model${i}
+    mkdir -p /fsx1/model${i}/{raw_data,processed_data,cache,temp}
+    chmod -R 750 /fsx1/model${i}
+done
 
-    # 로그 디렉토리
-    mkdir -p /fsx3/model${i}/{training_logs,tensorboard}
-    chmod -R 775 /fsx3/model${i}
+# FSx2 (체크포인트) 구조 생성
+echo "Setting up FSx2 (checkpoints)..."
+for i in {1..7}; do
+    mkdir -p /fsx2/model${i}/{checkpoints/{latest,archive},outputs/{eval,predictions}}
+    chmod -R 750 /fsx2/model${i}
+done
+
+# FSx3 (로그) 구조 생성
+echo "Setting up FSx3 (logs)..."
+for i in {1..7}; do
+    mkdir -p /fsx3/model${i}/{training_logs,tensorboard,metrics,debug}
+    chmod -R 700 /fsx3/model${i}
 done
 
 # 소유권 설정
@@ -776,12 +824,21 @@ chown -R ec2-user:ec2-user /fsx1
 chown -R ec2-user:ec2-user /fsx2
 chown -R ec2-user:ec2-user /fsx3
 
+# 스트라이핑 설정
+echo "Setting Lustre striping..."
+# 큰 파일을 위한 스트라이핑 (체크포인트)
+lfs setstripe --stripe-count 8 --stripe-size 4M /fsx2/*/checkpoints
+# 중간 크기 파일을 위한 스트라이핑 (처리된 데이터)
+lfs setstripe --stripe-count 4 --stripe-size 1M /fsx1/*/processed_data
+# 작은 파일을 위한 스트라이핑 (로그)
+lfs setstripe --stripe-count 1 --stripe-size 1M /fsx3/*/training_logs
+
 # 디렉토리 구조 확인
 echo "Created directory structure:"
 echo "FSx1 (datasets):"
-tree -L 2 /fsx1
+tree -L 3 /fsx1
 echo "FSx2 (checkpoints/outputs):"
-tree -L 3 /fsx2
+tree -L 4 /fsx2
 echo "FSx3 (logs):"
 tree -L 3 /fsx3
 
@@ -807,21 +864,23 @@ echo "Setup completed successfully"
 
 # 모델별 디렉토리 설정
 MODEL_ID=1
-CHECKPOINT_DIR="/fsx2/model${MODEL_ID}/checkpoints"
-OUTPUT_DIR="/fsx2/model${MODEL_ID}/outputs"
-LOG_DIR="/fsx3/model${MODEL_ID}/training_logs"
-TENSORBOARD_DIR="/fsx3/model${MODEL_ID}/tensorboard"
 
-# 훈련 데이터 경로
-DATA_DIR="/fsx1/datasets"
+# 수정된 경로들
+SHARED_DATA_DIR="/fsx1/shared_datasets"                    # 공유 데이터셋
+PROCESSED_DATA_DIR="/fsx1/model${MODEL_ID}/processed_data" # 전처리된 데이터
+CHECKPOINT_DIR="/fsx2/model${MODEL_ID}/checkpoints/latest" # 최신 체크포인트
+OUTPUT_DIR="/fsx2/model${MODEL_ID}/outputs"                # 출력
+LOG_DIR="/fsx3/model${MODEL_ID}/training_logs"            # 학습 로그
+TENSORBOARD_DIR="/fsx3/model${MODEL_ID}/tensorboard"      # Tensorboard
 
 # 분산 훈련 실행
 srun python train.py \
+    --shared-data-dir ${SHARED_DATA_DIR} \
+    --processed-data-dir ${PROCESSED_DATA_DIR} \
     --checkpoint-dir ${CHECKPOINT_DIR} \
     --output-dir ${OUTPUT_DIR} \
     --log-dir ${LOG_DIR} \
     --tensorboard-dir ${TENSORBOARD_DIR} \
-    --data-dir ${DATA_DIR} \
     --model-name "model${MODEL_ID}"
 ```
 
