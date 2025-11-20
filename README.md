@@ -308,9 +308,10 @@ pcluster create-cluster \
 ```
 # 클러스터 생성 
 pcluster create-cluster \
---cluster-name p5e-80node-cluster \
---cluster-configuration cluster-config.yaml \
---region ap-southeast-3
+    --cluster-name p5e-80node-cluster \
+    --cluster-configuration cluster-config.yaml \
+    --region ap-southeast-3 \
+    --rollback-on-failure false
 # 실시간 상태 확인
 watch -n 10 'pcluster describe-cluster \
 --cluster-name p5e-80node-cluster \
@@ -340,7 +341,7 @@ HEAD_NODE_IP=$(pcluster describe-cluster \
     --query "headNode.publicIpAddress" \
     --output text)
 
-# 2. 접속 방법 (세 가지 중 선택)
+# 2. 접속 방법 (4 가지 중 선택)
 
 # 방법 1: pcluster ssh 사용
 pcluster ssh \
@@ -352,6 +353,8 @@ pcluster ssh \
 ssh -i ~/.ssh/p5e-cluster-key.pem ec2-user@$HEAD_NODE_IP
 
 # 방법 3: EC2 콘솔에서 헤드노드를 Session Manager를 통해 접근(가장 간편)
+
+# 방법 4: ParallelCluster UI (별도 설치 필요)
 ```
 
 ### Phase 3: 검증 및 테스트(예시)
@@ -884,7 +887,7 @@ srun python train.py \
     --model-name "model${MODEL_ID}"
 ```
 
-## 하나의 클러스터에 여러개의 모델을 훈련시킬 때PARALLELCLUSTER YAML 파일 입장에서 고려해야할 사항은?
+## 하나의 클러스터에 여러개의 모델을 훈련시킬 때 PARALLELCLUSTER YAML 파일 입장에서 고려해야할 사항은?
 - A: 메모리 기반 스케줄링 활성화
 -   여러 작업이 동일한 노드를 공유할 수 있도록 메모리 기반 스케줄링을 활성화
 ```
@@ -914,6 +917,11 @@ Scheduling:
    └── 노드3: 모델D(2 GPU) + 모델E(3 GPU) + 모델F(3 GPU)
 ```
 
+## ParallelCluster 참고 링크
+- Launch instances with On-Demand Capacity Reservations (ODCR)
+  - https://docs.aws.amazon.com/parallelcluster/latest/ug/launch-instances-odcr-v3.html
+-   Launch instances with Capacity Blocks (CB)
+  - https://docs.aws.amazon.com/parallelcluster/latest/ug/launch-instances-capacity-blocks.html
 ## 분산 트레이닝에서 스토리지 정책은?
 - 원본 훈련 데이터셋
 - 체크 포인트
