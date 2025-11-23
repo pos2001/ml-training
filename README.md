@@ -595,44 +595,207 @@ sbatch --wait nccl_test_all.sh     # 작업 제출 및 완료 대기
 
   - 3.2.4 2 노드 FSx for Lustre 성능 테스트
    ```
+#!/bin/bash
+# FSx 성능 테스트 스크립트 생성
 cat > test_fsx_performance.sh <<'EOF'
 #!/bin/bash
-#SBATCH --job-name=fsx-test
+#SBATCH --job-name=fsx-perf-test
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=8
-#SBATCH --time=00:30:00
-#SBATCH --output=/fsx3/logs/fsx-test-%j.out
+#SBATCH --time=01:00:00
+#SBATCH --output=logs/fsx-test-%j.out
+#SBATCH --error=logs/fsx-test-%j.err
 
-echo "=== Starting FSx Performance Tests ==="
-date
+# 로그 디렉토리 생성
+mkdir -p logs results
 
-# 테스트할 FSx 마운트 포인트들
+echo "======================================"
+echo "FSx for Lustre Performance Test Suite"
+echo "Date: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Nodes: $SLURM_JOB_NODELIST"
+echo "======================================"
+
+# 필수 도구 확인
+check_tools() {
+    local missing=0
+    
+    if ! command -v ior &> /dev/null; then
+        echo "ERROR: ior not found"
+        missing=1
+    fi
+    
+    if ! command -v mdtest &> /dev/null; then
+        echo "ERROR: mdtest not found"
+        missing=1
+    fi
+    
+    if [ $missing -eq 1 ]; then
+        echo "Please install missing tools:"
+        echo "  spack install ior"
+        echo "  # or"
+        echo "  module load ior"
+        exit 1
+    fi
+    
+    echo "✓ All required tools found"
+}
+
+check_tools
+
+# 테스트할 FSx 마운트 포인트
 FSX_MOUNTS=("/fsx1" "/fsx2" "/fsx3" "/fsx4")
 
+# 결과 파일
+RESULTS_FILE="results/fsx-performance-${SLURM_JOB_ID}.txt"
+echo "FSx Performance Test Results - $(date)" > "$RESULTS_FILE"
+echo "Nodes: $SLURM_JOB_NODELIST" >> "$RESULTS_FILE"
+echo "======================================" >> "$RESULTS_FILE"
+
+# 각 FSx 마운트 테스트
 for mount in "${FSX_MOUNTS[@]}"; do
-    echo "=== Testing $mount ==="
+    echo ""
+    echo "======================================"
+    echo "Testing: $mount"
+    echo "======================================"
     
-    # 기본 파일시스템 정보
-    echo "Mount info:"
-    df -h $mount
+    # 마운트 존재 확인
+    if [ ! -d "$mount" ]; then
+        echo "WARNING: $mount not found, skipping..."
+        echo "$mount: NOT FOUND" >> "$RESULTS_FILE"
+        continue
+    fi
     
-    # IOR 순차 읽기/쓰기 테스트
-    echo "Sequential I/O test:"
-    srun ior -a POSIX -w -r \
-        -o ${mount}/ior_test \
-        -t 1m -b 16m -s 100 -F
+    # 쓰기 권한 확인
+    if [ ! -w "$mount" ]; then
+        echo "WARNING: $mount not writable, skipping..."
+        echo "$mount: NOT WRITABLE" >> "$RESULTS_FILE"
+        continue
+    fi
     
-    # mdtest 메타데이터 테스트
-    echo "Metadata test:"
-    srun mdtest -n 1000 -d ${mount}/mdtest
+    # 파일시스템 정보
+    echo ""
+    echo "--- Filesystem Info ---"
+    df -h "$mount"
+    echo ""
     
-    echo "=== Completed testing $mount ==="
-    echo
+    # 테스트 디렉토리 생성
+    TEST_DIR="${mount}/perf_test_${SLURM_JOB_ID}"
+    mkdir -p "$TEST_DIR"
+    
+    echo "$mount:" >> "$RESULTS_FILE"
+    
+    # 1. IOR 순차 쓰기 테스트
+    echo "--- IOR Sequential Write Test ---"
+    IOR_WRITE_OUTPUT=$(srun ior \
+        -a POSIX \
+        -w \
+        -o "${TEST_DIR}/ior_test" \
+        -t 1M \
+        -b 16M \
+        -s 100 \
+        -F \
+        2>&1 | tee /dev/tty | grep "write" | tail -1)
+    
+    echo "  Write: $IOR_WRITE_OUTPUT" >> "$RESULTS_FILE"
+    
+    # 2. IOR 순차 읽기 테스트
+    echo "--- IOR Sequential Read Test ---"
+    IOR_READ_OUTPUT=$(srun ior \
+        -a POSIX \
+        -r \
+        -o "${TEST_DIR}/ior_test" \
+        -t 1M \
+        -b 16M \
+        -s 100 \
+        -F \
+        2>&1 | tee /dev/tty | grep "read" | tail -1)
+    
+    echo "  Read: $IOR_READ_OUTPUT" >> "$RESULTS_FILE"
+    
+    # 3. IOR 랜덤 I/O 테스트
+    echo "--- IOR Random I/O Test ---"
+    IOR_RANDOM_OUTPUT=$(srun ior \
+        -a POSIX \
+        -w -r \
+        -z \
+        -o "${TEST_DIR}/ior_random" \
+        -t 1M \
+        -b 16M \
+        -s 50 \
+        -F \
+        2>&1 | tee /dev/tty | grep "Max" | tail -1)
+    
+    echo "  Random: $IOR_RANDOM_OUTPUT" >> "$RESULTS_FILE"
+    
+    # 4. mdtest 메타데이터 테스트
+    echo "--- mdtest Metadata Test ---"
+    MDTEST_OUTPUT=$(srun mdtest \
+        -n 10000 \
+        -i 3 \
+        -d "${TEST_DIR}/mdtest" \
+        -F \
+        2>&1 | tee /dev/tty | grep "File creation" | tail -1)
+    
+    echo "  Metadata: $MDTEST_OUTPUT" >> "$RESULTS_FILE"
+    
+    # 5. 작은 파일 I/O 테스트
+    echo "--- Small File I/O Test ---"
+    SMALL_FILE_OUTPUT=$(srun ior \
+        -a POSIX \
+        -w -r \
+        -o "${TEST_DIR}/small_files" \
+        -t 4K \
+        -b 1M \
+        -s 100 \
+        -F \
+        2>&1 | tee /dev/tty | grep "Max" | tail -1)
+    
+    echo "  Small files: $SMALL_FILE_OUTPUT" >> "$RESULTS_FILE"
+    
+    # 테스트 파일 정리
+    echo "--- Cleaning up test files ---"
+    rm -rf "$TEST_DIR"
+    
+    echo "✓ Completed testing $mount"
+    echo "" >> "$RESULTS_FILE"
 done
 
-echo "=== All FSx tests completed ==="
-date
+# 최종 요약
+echo ""
+echo "======================================"
+echo "Test Suite Completed"
+echo "======================================"
+echo "Results saved to: $RESULTS_FILE"
+echo ""
+cat "$RESULTS_FILE"
+
+echo ""
+echo "======================================"
+echo "Completed: $(date)"
+echo "======================================"
 EOF
+
+# 로그 및 결과 디렉토리 생성
+mkdir -p logs results
+
+# 실행 권한 부여
+chmod +x test_fsx_performance.sh
+
+# 작업 제출
+echo "Submitting FSx performance test..."
+JOB_ID=$(sbatch test_fsx_performance.sh | awk '{print $4}')
+
+echo ""
+echo "Job submitted: $JOB_ID"
+echo "Log files:"
+echo "  Output: logs/fsx-test-$JOB_ID.out"
+echo "  Error:  logs/fsx-test-$JOB_ID.err"
+echo "  Results: results/fsx-performance-$JOB_ID.txt"
+echo ""
+echo "Monitor with:"
+echo "  tail -f logs/fsx-test-$JOB_ID.out"
+
 ```
 
 
