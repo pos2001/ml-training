@@ -128,7 +128,7 @@ echo "All operations completed successfully"
 ### Phase 2: 클러스터 배포(예시)
 - 2.1 ParallelCluster 설치(최신 버전 권장)
   -  https://github.com/aws/aws-parallelcluster/releases
-- 2.2 Yaml 설정 파일 작성
+- 2.2 Yaml 설정 파일 작성(단순 예시이며,고객 상황에 따라 옵션이 다를 수 있음)
 ```
 Region: ap-southeast-3                # AWS 리전 지정 (자카르타)
 Version: 3.7.0                        # ParallelCluster 버전
@@ -161,7 +161,6 @@ Scheduling:                         # 작업 스케줄링 설정
   SlurmSettings:                    # Slurm 세부 설정
     ScaledownIdletime: 10          # 유휴시간 후 노드 종료 (분)
     QueueUpdateStrategy: DRAIN      # 작업 종료 후 노드 정리 방식
-    EnableMemoryBasedScheduling: true  # 메모리 기반 스케줄링 활성화
 
 SlurmQueues:                        # Slurm 작업 큐 설정
   - Name: gpu-queue                 # GPU 작업 전용 큐 이름
@@ -187,9 +186,9 @@ SlurmQueues:                        # Slurm 작업 큐 설정
     ComputeResources:           # 컴퓨트 리소스 설정
       - Name: p5e-nodes        # 노드 그룹 이름
         InstanceType: p5e.48xlarge  # GPU 인스턴스 타입 (48xlarge = 8 GPU)
-        MinCount: 0            # 최소 노드 수
+        MinCount: 80            # 최소 노드 수
         MaxCount: 80           # 최대 노드 수
-        DisableSimultaneousMultithreading: false  # SMT 비활성화 여부
+        
         Efa:                   # EFA(Elastic Fabric Adapter) 설정
           Enabled: true       # 고성능 네트워킹 활성화
           GdrSupport: ENABLED # GPU Direct RDMA 지원 활성화
@@ -291,25 +290,25 @@ Tags:                      # 리소스 태그
    └── 14일 로그 보관
 ```
 
-- 2.3 Yaml 검증
+- 2.3 Yaml 검증 (옵션)
 ```
 # 1. YAML 문법과 설정 검증(YAML 파일의 문법 오류 검사, 설정값의 유효성 검사, 필수 파라미터 누락 여부 확인)
-pcluster configure --config cluster-config.yaml
+pcluster create-cluster --dryrun true -n test-cluster -c config.yaml
 
 # 2. 클러스터 생성 시뮬레이션 (실제 생성하지 않고 시물레이션 만 수행, AWS 리소스 생성 가능 여부 확인, 권한 문제 사전 확인 등)
 : 이러한 사전 검증을 거치지 않으면, 생성 시도 후 다시 클러스터 삭제하는데 많은 시간 및 비용 소모
 pcluster create-cluster \
-    --cluster-name p5e-80node-cluster \
-    --cluster-configuration cluster-config.yaml \
-    --region ap-southeast-3 \
-    --dryrun
+    --dryrun true \
+    --cluster-name ml-cluster \
+    --cluster-configuration config.yaml \
+    --region ap-southeast-3
 ```
 - 2.4 클러스터 생성
 ```
 # 클러스터 생성 
 pcluster create-cluster \
     --cluster-name p5e-80node-cluster \
-    --cluster-configuration cluster-config.yaml \
+    --cluster-configuration config.yaml \
     --region ap-southeast-3 \
     --rollback-on-failure false
 # 실시간 상태 확인
@@ -352,7 +351,7 @@ pcluster ssh \
 # 방법 2: 일반 ssh 사용
 ssh -i ~/.ssh/p5e-cluster-key.pem ec2-user@$HEAD_NODE_IP
 
-# 방법 3: EC2 콘솔에서 헤드노드를 Session Manager를 통해 접근(가장 간편)
+# 방법 3: EC2 콘솔에서 헤드노드를 Session Manager를 통해 접근(가장 간편, 핸즈온 실습에서 사용한 방법)
 
 # 방법 4: ParallelCluster UI (별도 설치 필요)
 ```
@@ -409,30 +408,16 @@ sbatch test_2nodes.sh
 watch -n 10 sinfo
 ```
 
-     - 2 노드 기본 테스트 예상 결과
+     - 2 노드 기본 테스트 예상 결과(sinfo)
 
-```
-1. 초기 상태:
-   PARTITION  AVAIL  NODES  STATE
-   gpu-queue   up     0     none
 
-2. 노드 시작 중:
-   PARTITION  AVAIL  NODES  STATE
-   gpu-queue   up     2     alloc+
-
-3. 작업 실행 중:
-   PARTITION  AVAIL  NODES  STATE
-   gpu-queue   up     2     allocated
-
-4. 작업 완료 후:
-   PARTITION  AVAIL  NODES  STATE
-   gpu-queue   up     2     idle~
-```
   
   - 3.2.2 2 노드 GPU 및 EFA 검증
     - GPU와 EFA(Elastic Fabric Adapter) 네트워크의 상태를 종합적으로 검증
 ```
 # GPU 및 EFA 검증 스크립트 생성
+#!/bin/bash
+# GPU/EFA 검증 스크립트 생성
 cat > validate_gpu_efa.sh <<'EOF'
 #!/bin/bash
 #SBATCH --job-name=validate
@@ -440,26 +425,110 @@ cat > validate_gpu_efa.sh <<'EOF'
 #SBATCH --ntasks-per-node=8
 #SBATCH --gres=gpu:8
 #SBATCH --time=00:30:00
-#SBATCH --output=/fsx3/logs/validate-%j.out
+#SBATCH --output=logs/validate-%j.out
+#SBATCH --error=logs/validate-%j.err
 
-# # GPU 정보 수집
-echo "=== GPU Information ==="
-srun nvidia-smi --query-gpu=name,memory.total --format=csv
+# 로그 디렉토리 생성
+mkdir -p logs
 
-# # EFA 상태 확인
-echo -e "\n=== EFA Status ==="
-srun fi_info -p efa -t FI_EP_RDM
+echo "======================================"
+echo "GPU/EFA Validation Started"
+echo "Date: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Nodes: $SLURM_JOB_NODELIST"
+echo "======================================"
 
-# # NVLink 상태 확인
+# 1. GPU 정보 수집 (노드별)
+echo -e "\n=== GPU Information ==="
+srun --ntasks-per-node=1 bash -c '
+  echo "Node: $(hostname)"
+  nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
+'
+
+# 2. GPU 상세 정보
+echo -e "\n=== GPU Topology ==="
+srun --ntasks-per-node=1 nvidia-smi topo -m
+
+# 3. CUDA 버전 확인
+echo -e "\n=== CUDA Version ==="
+srun --ntasks-per-node=1 bash -c '
+  echo "Node: $(hostname)"
+  nvcc --version 2>/dev/null || echo "CUDA not found in PATH"
+'
+
+# 4. EFA 어댑터 확인
+echo -e "\n=== EFA Adapters ==="
+srun --ntasks-per-node=1 bash -c '
+  echo "Node: $(hostname)"
+  fi_info -p efa -t FI_EP_RDM | grep -A 5 "provider:"
+'
+
+# 5. EFA 디바이스 확인
+echo -e "\n=== EFA Devices ==="
+srun --ntasks-per-node=1 bash -c '
+  echo "Node: $(hostname)"
+  ls -la /dev/infiniband/
+'
+
+# 6. NVLink 상태 확인
+echo -e "\n=== NVLink Status ==="
+srun --ntasks-per-node=1 bash -c '
+  echo "Node: $(hostname)"
+  nvidia-smi nvlink -s
+'
+
+# 7. GPUDirect RDMA 확인
 echo -e "\n=== GPUDirect RDMA Status ==="
-srun nvidia-smi nvlink --status
+srun --ntasks-per-node=1 bash -c '
+  echo "Node: $(hostname)"
+  if [ -e /sys/kernel/mm/memory_peers/nv_mem/version ]; then
+    echo "GPUDirect RDMA: Enabled"
+    cat /sys/kernel/mm/memory_peers/nv_mem/version
+  else
+    echo "GPUDirect RDMA: Not found"
+  fi
+'
+
+# 8. 네트워크 인터페이스 확인
+echo -e "\n=== Network Interfaces ==="
+srun --ntasks-per-node=1 bash -c '
+  echo "Node: $(hostname)"
+  ip link show | grep -E "^[0-9]+: (eth|ens|efa)"
+'
+
+# 9. 간단한 통신 테스트 (선택사항)
+echo -e "\n=== MPI Communication Test ==="
+if command -v mpirun &> /dev/null; then
+  srun hostname
+else
+  echo "MPI not available for communication test"
+fi
+
+echo -e "\n======================================"
+echo "Validation Completed"
+echo "Date: $(date)"
+echo "======================================"
 EOF
 
-# 작업 제출
-sbatch validate_gpu_efa.sh
+# 로그 디렉토리 생성
+mkdir -p logs
 
-# 로그 모니터링
-tail -f /fsx3/logs/validate-*.out
+# 실행 권한 부여
+chmod +x validate_gpu_efa.sh
+
+# 작업 제출
+echo "Submitting validation job..."
+JOB_ID=$(sbatch validate_gpu_efa.sh | awk '{print $4}')
+
+echo "Job ID: $JOB_ID"
+echo "Log file: logs/validate-$JOB_ID.out"
+echo ""
+echo "Monitor with:"
+echo "  tail -f logs/validate-$JOB_ID.out"
+echo ""
+echo "Or check job status:"
+echo "  squeue -j $JOB_ID"
+
 ```
 
 
@@ -895,10 +964,4 @@ srun python train.py \
   - https://docs.aws.amazon.com/parallelcluster/latest/ug/launch-instances-odcr-v3.html
 -   Launch instances with Capacity Blocks (CB)
   - https://docs.aws.amazon.com/parallelcluster/latest/ug/launch-instances-capacity-blocks.html
-## 분산 트레이닝에서 스토리지 정책은?
-- 원본 훈련 데이터셋
-- 체크 포인트
-- 모델 가중치
-- 옵티마이저 선택
-- 로그 및 메트릭
-- 중간 결과 및 임시 파일
+
