@@ -1,0 +1,583 @@
+
+ParallelCluster + DLC 통합 가이드
+
+정확합니다! 하지만 더 나은 방법들이 있습니다. DLC(AWS Deep Learning Containers)를 ParallelCluster에 통합하는 여러 방법을 알려드리겠습니다.
+🎯 DLC 통합 방법 비교
+방법	난이도	성능	유지보수	권장도
+1. OnNodeConfigured 스크립트	⭐⭐	⭐⭐⭐	⭐⭐	⭐⭐⭐
+2. Custom AMI	⭐⭐⭐⭐	⭐⭐⭐⭐⭐	⭐⭐⭐⭐	⭐⭐⭐⭐⭐
+3. Enroot/Pyxis (DLC 변환)	⭐⭐⭐	⭐⭐⭐⭐⭐	⭐⭐⭐⭐⭐	⭐⭐⭐⭐⭐
+4. Docker 직접 사용	⭐	⭐⭐	⭐	⭐⭐
+📦 방법 1: OnNodeConfigured 스크립트 (가장 간단)
+ParallelCluster 설정
+# config.yaml
+Region: us-east-1
+Image:
+  Os: alinux2
+
+HeadNode:
+  InstanceType: c5.4xlarge
+  Networking:
+    SubnetId: subnet-12345678
+  Iam:
+    AdditionalIamPolicies:
+      - Policy: arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+  CustomActions:
+    OnNodeConfigured:
+      Script: s3://my-bucket/scripts/setup_dlc_head.sh
+
+Scheduling:
+  Scheduler: slurm
+  SlurmQueues:
+    - Name: compute
+      ComputeResources:
+        - Name: gpu-nodes
+          InstanceType: p4d.24xlarge
+          MinCount: 0
+          MaxCount: 100
+          Efa:
+            Enabled: true
+      
+      Networking:
+        SubnetIds:
+          - subnet-12345678
+        PlacementGroup:
+          Enabled: true
+      
+      # 컴퓨트 노드에서 DLC 설치
+      CustomActions:
+        OnNodeConfigured:
+          Script: s3://my-bucket/scripts/setup_dlc_compute.sh
+          Args:
+            - pytorch
+            - 2.1.0-gpu-py310-cu118-ubuntu20.04
+      
+      Iam:
+        AdditionalIamPolicies:
+          - Policy: arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+SharedStorage:
+  - MountDir: /fsx
+    Name: fsx-storage
+    StorageType: FsxLustre
+    FsxLustreSettings:
+      StorageCapacity: 1200
+
+OnNodeConfigured 스크립트
+#!/bin/bash
+# scripts/setup_dlc_compute.sh
+# S3에 업로드: aws s3 cp setup_dlc_compute.sh s3://my-bucket/scripts/
+
+set -e
+
+# 인자 받기
+DLC_FRAMEWORK=${1:-pytorch}  # pytorch, tensorflow, mxnet
+DLC_VERSION=${2:-2.1.0-gpu-py310-cu118-ubuntu20.04}
+
+echo "=== Setting up DLC on Compute Node ==="
+echo "Framework: $DLC_FRAMEWORK"
+echo "Version: $DLC_VERSION"
+
+# 1. Docker 설치 (Amazon Linux 2)
+if ! command -v docker &> /dev/null; then
+    echo "Installing Docker..."
+    sudo yum update -y
+    sudo yum install -y docker
+    sudo systemctl start docker
+    sudo systemctl enable docker
+    sudo usermod -aG docker ec2-user
+fi
+
+# 2. NVIDIA Container Toolkit 설치
+if ! command -v nvidia-container-toolkit &> /dev/null; then
+    echo "Installing NVIDIA Container Toolkit..."
+    
+    distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+    curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.repo | \
+        sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo
+    
+    sudo yum install -y nvidia-container-toolkit
+    sudo nvidia-ctk runtime configure --runtime=docker
+    sudo systemctl restart docker
+fi
+
+# 3. ECR 로그인
+AWS_REGION=$(ec2-metadata --availability-zone | sed 's/placement: \(.*\).$/\1/')
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+echo "Logging into ECR..."
+aws ecr get-login-password --region $AWS_REGION | \
+    docker login --username AWS --password-stdin \
+    763104351884.dkr.ecr.$AWS_REGION.amazonaws.com
+
+# 4. DLC 이미지 Pull
+DLC_IMAGE="763104351884.dkr.ecr.$AWS_REGION.amazonaws.com/$DLC_FRAMEWORK-training:$DLC_VERSION"
+echo "Pulling DLC image: $DLC_IMAGE"
+docker pull $DLC_IMAGE
+
+# 5. Enroot 설치 (선택적 - Slurm 통합용)
+if ! command -v enroot &> /dev/null; then
+    echo "Installing Enroot..."
+    
+    # Enroot 설치
+    sudo yum install -y jq squashfs-tools parallel
+    
+    ENROOT_VERSION=3.4.1
+    wget https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_VERSION}/enroot-${ENROOT_VERSION}-1.el7.x86_64.rpm
+    wget https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_VERSION}/enroot+caps-${ENROOT_VERSION}-1.el7.x86_64.rpm
+    
+    sudo rpm -ivh enroot-${ENROOT_VERSION}-1.el7.x86_64.rpm
+    sudo rpm -ivh enroot+caps-${ENROOT_VERSION}-1.el7.x86_64.rpm
+    
+    rm -f enroot*.rpm
+fi
+
+# 6. DLC를 Enroot 형식으로 변환
+echo "Converting DLC to Enroot format..."
+mkdir -p /fsx/containers
+
+# ECR 인증 설정
+aws ecr get-login-password --region $AWS_REGION | \
+    enroot-credentials set \
+    --username AWS \
+    --password-stdin \
+    763104351884.dkr.ecr.$AWS_REGION.amazonaws.com
+
+# Enroot로 import
+enroot import \
+    --output /fsx/containers/${DLC_FRAMEWORK}-${DLC_VERSION}.sqsh \
+    docker://$DLC_IMAGE
+
+echo "DLC setup completed!"
+echo "Container image: /fsx/containers/${DLC_FRAMEWORK}-${DLC_VERSION}.sqsh"
+
+# 7. 검증
+echo "Verifying installation..."
+docker run --rm --gpus all $DLC_IMAGE nvidia-smi
+
+🏗️ 방법 2: Custom AMI (최고 성능) ⭐⭐⭐⭐⭐
+2-1. Custom AMI 빌드
+#!/bin/bash
+# scripts/build_dlc_ami.sh
+
+set -e
+
+echo "=== Building Custom ParallelCluster AMI with DLC ==="
+
+# 1. ParallelCluster 기본 AMI로 인스턴스 시작
+BASE_AMI="ami-0abcdef1234567890"  # ParallelCluster 기본 AMI
+INSTANCE_TYPE="p4d.24xlarge"
+
+# 인스턴스 시작
+INSTANCE_ID=$(aws ec2 run-instances \
+    --image-id $BASE_AMI \
+    --instance-type $INSTANCE_TYPE \
+    --key-name my-keypair \
+    --subnet-id subnet-12345678 \
+    --security-group-ids sg-12345678 \
+    --iam-instance-profile Name=ParallelClusterInstanceProfile \
+    --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":500,"VolumeType":"gp3"}}]' \
+    --query 'Instances[0].InstanceId' \
+    --output text)
+
+echo "Instance started: $INSTANCE_ID"
+echo "Waiting for instance to be running..."
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+
+# 인스턴스 IP 가져오기
+INSTANCE_IP=$(aws ec2 describe-instances \
+    --instance-ids $INSTANCE_ID \
+    --query 'Reservations[0].Instances[0].PublicIpAddress' \
+    --output text)
+
+echo "Instance IP: $INSTANCE_IP"
+echo "Waiting for SSH to be ready..."
+sleep 60
+
+# 2. 설정 스크립트 실행
+cat > /tmp/setup_ami.sh << 'EOF'
+#!/bin/bash
+set -e
+
+echo "=== Configuring AMI with DLC ==="
+
+# Docker 설치
+sudo yum update -y
+sudo yum install -y docker
+sudo systemctl start docker
+sudo systemctl enable docker
+sudo usermod -aG docker ec2-user
+
+# NVIDIA Container Toolkit
+distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.repo | \
+    sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo
+sudo yum install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+
+# Enroot & Pyxis 설치
+sudo yum install -y jq squashfs-tools parallel
+
+ENROOT_VERSION=3.4.1
+wget https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_VERSION}/enroot-${ENROOT_VERSION}-1.el7.x86_64.rpm
+wget https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_VERSION}/enroot+caps-${ENROOT_VERSION}-1.el7.x86_64.rpm
+sudo rpm -ivh enroot-${ENROOT_VERSION}-1.el7.x86_64.rpm
+sudo rpm -ivh enroot+caps-${ENROOT_VERSION}-1.el7.x86_64.rpm
+
+# Pyxis 설치
+PYXIS_VERSION=0.19.0
+wget https://github.com/NVIDIA/pyxis/archive/refs/tags/v${PYXIS_VERSION}.tar.gz
+tar xf v${PYXIS_VERSION}.tar.gz
+cd pyxis-${PYXIS_VERSION}
+sudo make install
+sudo mkdir -p /etc/slurm/plugstack.conf.d
+echo "required /usr/local/lib/slurm/spank_pyxis.so" | sudo tee /etc/slurm/plugstack.conf.d/pyxis.conf
+
+# DLC 이미지 미리 다운로드 (선택적)
+AWS_REGION=$(ec2-metadata --availability-zone | sed 's/placement: \(.*\).$/\1/')
+
+# ECR 로그인
+aws ecr get-login-password --region $AWS_REGION | \
+    docker login --username AWS --password-stdin \
+    763104351884.dkr.ecr.$AWS_REGION.amazonaws.com
+
+# 주요 DLC 이미지 Pull
+for framework in pytorch tensorflow; do
+    echo "Pulling $framework DLC..."
+    docker pull 763104351884.dkr.ecr.$AWS_REGION.amazonaws.com/${framework}-training:2.1.0-gpu-py310-cu118-ubuntu20.04
+done
+
+echo "AMI setup completed!"
+EOF
+
+# 스크립트 전송 및 실행
+scp -i ~/.ssh/my-keypair.pem /tmp/setup_ami.sh ec2-user@$INSTANCE_IP:/tmp/
+ssh -i ~/.ssh/my-keypair.pem ec2-user@$INSTANCE_IP 'bash /tmp/setup_ami.sh'
+
+# 3. AMI 생성
+echo "Creating AMI..."
+AMI_NAME="parallelcluster-dlc-$(date +%Y%m%d-%H%M%S)"
+AMI_ID=$(aws ec2 create-image \
+    --instance-id $INSTANCE_ID \
+    --name $AMI_NAME \
+    --description "ParallelCluster with DLC pre-installed" \
+    --query 'ImageId' \
+    --output text)
+
+echo "AMI created: $AMI_ID"
+echo "Waiting for AMI to be available..."
+aws ec2 wait image-available --image-ids $AMI_ID
+
+# 4. 인스턴스 종료
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID
+
+echo "=== Custom AMI Build Complete ==="
+echo "AMI ID: $AMI_ID"
+echo "Use this AMI in your ParallelCluster config"
+
+2-2. Custom AMI 사용
+# config-with-custom-ami.yaml
+Region: us-east-1
+
+Image:
+  Os: alinux2
+  CustomAmi: ami-0abc123def456789  # 위에서 생성한 Custom AMI
+
+HeadNode:
+  InstanceType: c5.4xlarge
+  Networking:
+    SubnetId: subnet-12345678
+
+Scheduling:
+  Scheduler: slurm
+  SlurmQueues:
+    - Name: compute
+      ComputeResources:
+        - Name: gpu-nodes
+          InstanceType: p4d.24xlarge
+          MinCount: 0
+          MaxCount: 100
+          Efa:
+            Enabled: true
+      
+      Networking:
+        SubnetIds:
+          - subnet-12345678
+
+SharedStorage:
+  - MountDir: /fsx
+    Name: fsx-storage
+    StorageType: FsxLustre
+    FsxLustreSettings:
+      StorageCapacity: 1200
+
+🚀 방법 3: Enroot/Pyxis + DLC (권장) ⭐⭐⭐⭐⭐
+3-1. ParallelCluster 설정 (Enroot/Pyxis 포함)
+# config-enroot-dlc.yaml
+Region: us-east-1
+Image:
+  Os: alinux2
+
+HeadNode:
+  InstanceType: c5.4xlarge
+  Networking:
+    SubnetId: subnet-12345678
+  Iam:
+    AdditionalIamPolicies:
+      - Policy: arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+  CustomActions:
+    OnNodeConfigured:
+      Script: s3://my-bucket/scripts/setup_enroot_pyxis.sh
+
+Scheduling:
+  Scheduler: slurm
+  SlurmQueues:
+    - Name: compute
+      ComputeResources:
+        - Name: gpu-nodes
+          InstanceType: p4d.24xlarge
+          MinCount: 0
+          MaxCount: 100
+          Efa:
+            Enabled: true
+      
+      CustomActions:
+        OnNodeConfigured:
+          Script: s3://my-bucket/scripts/setup_enroot_pyxis.sh
+      
+      Iam:
+        AdditionalIamPolicies:
+          - Policy: arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+SharedStorage:
+  - MountDir: /fsx
+    Name: fsx-storage
+    StorageType: FsxLustre
+    FsxLustreSettings:
+      StorageCapacity: 1200
+      ImportPath: s3://my-bucket/containers  # DLC 컨테이너 저장
+
+3-2. Enroot/Pyxis 설치 스크립트
+#!/bin/bash
+# scripts/setup_enroot_pyxis.sh
+
+set -e
+
+NODE_TYPE=$(cat /etc/parallelcluster/cfnconfig | jq -r '.cfn_node_type')
+echo "=== Setting up Enroot/Pyxis on $NODE_TYPE ==="
+
+# 1. 의존성 설치
+sudo yum install -y jq squashfs-tools parallel fuse-overlayfs
+
+# 2. Enroot 설치
+ENROOT_VERSION=3.4.1
+
+if ! command -v enroot &> /dev/null; then
+    echo "Installing Enroot..."
+    wget https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_VERSION}/enroot-${ENROOT_VERSION}-1.el7.x86_64.rpm
+    wget https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_VERSION}/enroot+caps-${ENROOT_VERSION}-1.el7.x86_64.rpm
+    
+    sudo rpm -ivh enroot-${ENROOT_VERSION}-1.el7.x86_64.rpm
+    sudo rpm -ivh enroot+caps-${ENROOT_VERSION}-1.el7.x86_64.rpm
+    
+    rm -f enroot*.rpm
+fi
+
+# 3. Enroot 설정
+sudo mkdir -p /etc/enroot
+cat << 'EOF' | sudo tee /etc/enroot/enroot.conf
+ENROOT_RUNTIME_PATH /run/enroot/user-$(id -u)
+ENROOT_CACHE_PATH /fsx/enroot-cache
+ENROOT_DATA_PATH /fsx/enroot-data
+ENROOT_TEMP_PATH ${TMPDIR:-/tmp}
+EOF
+
+# 4. Pyxis 설치 (컴퓨트 노드만)
+if [ "$NODE_TYPE" == "ComputeFleet" ]; then
+    PYXIS_VERSION=0.19.0
+    
+    if [ ! -f /usr/local/lib/slurm/spank_pyxis.so ]; then
+        echo "Installing Pyxis..."
+        wget https://github.com/NVIDIA/pyxis/archive/refs/tags/v${PYXIS_VERSION}.tar.gz
+        tar xf v${PYXIS_VERSION}.tar.gz
+        cd pyxis-${PYXIS_VERSION}
+        sudo make install
+        cd ..
+        rm -rf pyxis-${PYXIS_VERSION} v${PYXIS_VERSION}.tar.gz
+    fi
+    
+    # Pyxis 설정
+    sudo mkdir -p /etc/slurm/plugstack.conf.d
+    echo "required /usr/local/lib/slurm/spank_pyxis.so" | \
+        sudo tee /etc/slurm/plugstack.conf.d/pyxis.conf
+fi
+
+# 5. ECR 인증 설정
+AWS_REGION=$(ec2-metadata --availability-zone | sed 's/placement: \(.*\).$/\1/')
+
+mkdir -p ~/.config/enroot
+aws ecr get-login-password --region $AWS_REGION | \
+    enroot-credentials set \
+    --username AWS \
+    --password-stdin \
+    763104351884.dkr.ecr.$AWS_REGION.amazonaws.com
+
+echo "Enroot/Pyxis setup completed!"
+
+3-3. DLC 이미지 준비 스크립트
+#!/bin/bash
+# scripts/prepare_dlc_containers.sh
+# 헤드 노드에서 한 번만 실행
+
+set -e
+
+AWS_REGION=$(aws configure get region)
+DLC_REGISTRY="763104351884.dkr.ecr.$AWS_REGION.amazonaws.com"
+
+# ECR 로그인
+aws ecr get-login-password --region $AWS_REGION | \
+    enroot-credentials set \
+    --username AWS \
+    --password-stdin \
+    $DLC_REGISTRY
+
+# 컨테이너 디렉토리 생성
+mkdir -p /fsx/containers/dlc
+
+# DLC 이미지 목록
+declare -A DLC_IMAGES=(
+    ["pytorch-2.1"]="pytorch-training:2.1.0-gpu-py310-cu118-ubuntu20.04"
+    ["pytorch-2.0"]="pytorch-training:2.0.1-gpu-py310-cu118-ubuntu20.04"
+    ["tensorflow-2.13"]="tensorflow-training:2.13.0-gpu-py310-cu118-ubuntu20.04"
+    ["mxnet-1.9"]="mxnet-training:1.9.0-gpu-py38-cu112-ubuntu20.04"
+)
+
+# 각 DLC 이미지를 Enroot 형식으로 변환
+for name in "${!DLC_IMAGES[@]}"; do
+    image="${DLC_IMAGES[$name]}"
+    echo "=== Processing $name ==="
+    
+    enroot import \
+        --output /fsx/containers/dlc/${name}.sqsh \
+        docker://${DLC_REGISTRY}/${image}
+    
+    echo "✓ Created /fsx/containers/dlc/${name}.sqsh"
+done
+
+echo ""
+echo "=== DLC Containers Ready ==="
+ls -lh /fsx/containers/dlc/
+
+🎯 실제 사용 예제
+DLC로 학습 실행
+#!/bin/bash
+# scripts/train_with_dlc.sh
+
+#SBATCH --job-name=dlc-pytorch-training
+#SBATCH --partition=compute
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --exclusive
+#SBATCH --output=logs/%x_%j.out
+
+# DLC 컨테이너 지정
+declare -a CONTAINER_ARGS=(
+    --container-image=/fsx/containers/dlc/pytorch-2.1.sqsh
+    --container-mounts=/fsx:/fsx
+)
+
+# Torchrun 설정
+declare -a TORCHRUN_ARGS=(
+    --nproc_per_node=8
+    --nnodes=$SLURM_JOB_NUM_NODES
+    --rdzv_id=$SLURM_JOB_ID
+    --rdzv_backend=c10d
+    --rdzv_endpoint=$(scontrol show hostname $SLURM_NODELIST | head -n1)
+)
+
+# DLC 컨테이너로 학습 실행
+srun -l "${CONTAINER_ARGS[@]}" \
+    torchrun "${TORCHRUN_ARGS[@]}" \
+    /fsx/training/train.py \
+    --data-path /fsx/data \
+    --output-dir /fsx/checkpoints \
+    --epochs 100
+
+여러 DLC 버전 동시 실행
+#!/bin/bash
+# scripts/multi_dlc_training.sh
+
+# PyTorch 2.1로 실험 1
+sbatch --job-name=exp1-pt21 \
+    --export=DLC_IMAGE=/fsx/containers/dlc/pytorch-2.1.sqsh \
+    scripts/train_template.sh
+
+# PyTorch 2.0로 실험 2
+sbatch --job-name=exp2-pt20 \
+    --export=DLC_IMAGE=/fsx/containers/dlc/pytorch-2.0.sqsh \
+    scripts/train_template.sh
+
+# TensorFlow로 실험 3
+sbatch --job-name=exp3-tf \
+    --export=DLC_IMAGE=/fsx/containers/dlc/tensorflow-2.13.sqsh \
+    scripts/train_template.sh
+
+📊 방법별 장단점 요약
+OnNodeConfigured 스크립트
+장점:
+✅ 설정 간단
+✅ 동적 업데이트 가능
+✅ 버전 관리 쉬움
+
+단점:
+❌ 노드 시작 시간 증가 (5-10분)
+❌ 네트워크 의존성
+❌ 스케일링 시 반복 다운로드
+
+Custom AMI
+장점:
+✅ 가장 빠른 노드 시작 (<2분)
+✅ 네트워크 독립적
+✅ 일관된 환경
+
+단점:
+❌ AMI 빌드 복잡
+❌ 업데이트 시 재빌드 필요
+❌ 리전별로 AMI 복사 필요
+
+Enroot/Pyxis + DLC (권장)
+장점:
+✅ HPC 환경 최적화
+✅ 빠른 컨테이너 시작
+✅ 여러 버전 동시 사용
+✅ FSx 캐싱으로 빠른 로드
+✅ Slurm 완벽 통합
+
+단점:
+❌ 초기 설정 복잡
+❌ Enroot/Pyxis 학습 필요
+
+🎓 최종 권장사항
+당신의 경우 (100개 ODCR, 다중 프레임워크)
+
+권장: Enroot/Pyxis + DLC ⭐⭐⭐⭐⭐
+
+이유:
+
+    FSx 공유 스토리지 활용 - DLC 컨테이너를 FSx에 한 번만 저장 - 모든 노드가 빠르게 접근
+
+    여러 DLC 버전 동시 사용 - PyTorch 2.1, 2.0, TensorFlow 등 - 작업별로 다른 컨테이너 선택
+
+    빠른 스케일링 - 노드 시작 시 다운로드 불필요 - FSx에서 직접 마운트 (초 단위)
+
+    Slurm 완벽 통합 - --container-image 옵션으로 간단 사용 - QoS, Accounting 모두 지원
+
+구현 순서
+1. ParallelCluster 생성 (Enroot/Pyxis 포함) └─ OnNodeConfigured로 Enroot/Pyxis 설치
+
+2. 헤드 노드에서 DLC 준비
+
+Advanced
+Connected
