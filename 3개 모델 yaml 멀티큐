@@ -1,0 +1,538 @@
+
+100개 인스턴스 ODCR 환경에서 3개 프레임워크 동시 실행 시 다중 큐(Multiple Queues) 전략이 훨씬 더 좋습니다!
+🎯 결론부터: 다중 큐 권장 ⭐⭐⭐⭐⭐
+
+이유:
+
+    ✅ 리소스 격리 및 우선순위 관리
+    ✅ 프레임워크별 최적화된 인스턴스 타입 사용
+    ✅ 장애 격리 (한 작업 실패가 다른 작업에 영향 없음)
+    ✅ 유연한 스케일링
+    ✅ 비용 최적화
+
+
+권장 아키텍처: 다중 큐 설계
+ParallelCluster 설정 (config.yaml)
+Region: us-east-1
+Image:
+  Os: alinux2
+
+HeadNode:
+  InstanceType: c5.4xlarge
+  Networking:
+    SubnetId: subnet-12345678
+  Iam:
+    AdditionalIamPolicies:
+      - Policy: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      - Policy: arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+  LocalStorage:
+    RootVolume:
+      Size: 100
+
+Scheduling:
+  Scheduler: slurm
+  SlurmSettings:
+    ScaledownIdletime: 10  # 10분 유휴 후 스케일다운
+    QueueUpdateStrategy: TERMINATE
+  
+  SlurmQueues:
+    # ============================================
+    # Queue 1: DDP - 빠른 실행, 작은 모델
+    # ============================================
+    - Name: ddp-queue
+      CapacityType: ONDEMAND
+      AllocationStrategy: lowest-price
+      
+      ComputeResources:
+        - Name: ddp-compute
+          InstanceType: p4d.24xlarge  # 8x A100 40GB
+          MinCount: 0
+          MaxCount: 20  # 20개 인스턴스 (160 GPUs)
+          DisableSimultaneousMultithreading: true
+          Efa:
+            Enabled: true
+            GdrSupport: true
+      
+      Networking:
+        SubnetIds:
+          - subnet-12345678
+        PlacementGroup:
+          Enabled: true
+      
+      ComputeSettings:
+        LocalStorage:
+          RootVolume:
+            Size: 200
+          EphemeralVolume:
+            MountDir: /scratch
+      
+      CustomActions:
+        OnNodeConfigured:
+          Script: s3://my-bucket/scripts/setup_ddp.sh
+      
+      Iam:
+        AdditionalIamPolicies:
+          - Policy: arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+          - Policy: arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+    # ============================================
+    # Queue 2: Megatron - 대규모 모델, 많은 리소스
+    # ============================================
+    - Name: megatron-queue
+      CapacityType: ONDEMAND
+      AllocationStrategy: lowest-price
+      
+      ComputeResources:
+        - Name: megatron-compute
+          InstanceType: p4de.24xlarge  # 8x A100 80GB (더 큰 메모리)
+          MinCount: 0
+          MaxCount: 50  # 50개 인스턴스 (400 GPUs)
+          DisableSimultaneousMultithreading: true
+          Efa:
+            Enabled: true
+            GdrSupport: true
+      
+      Networking:
+        SubnetIds:
+          - subnet-12345678
+        PlacementGroup:
+          Enabled: true
+      
+      ComputeSettings:
+        LocalStorage:
+          RootVolume:
+            Size: 500  # 더 큰 스토리지
+          EphemeralVolume:
+            MountDir: /scratch
+      
+      CustomActions:
+        OnNodeConfigured:
+          Script: s3://my-bucket/scripts/setup_megatron.sh
+      
+      Iam:
+        AdditionalIamPolicies:
+          - Policy: arn:aws:iam::aws:policy/AmazonS3FullAccess
+          - Policy: arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+    # ============================================
+    # Queue 3: DeepSpeed - 메모리 효율 중시
+    # ============================================
+    - Name: deepspeed-queue
+      CapacityType: ONDEMAND
+      AllocationStrategy: lowest-price
+      
+      ComputeResources:
+        - Name: deepspeed-compute
+          InstanceType: p4d.24xlarge  # 8x A100 40GB
+          MinCount: 0
+          MaxCount: 30  # 30개 인스턴스 (240 GPUs)
+          DisableSimultaneousMultithreading: true
+          Efa:
+            Enabled: true
+            GdrSupport: true
+      
+      Networking:
+        SubnetIds:
+          - subnet-12345678
+        PlacementGroup:
+          Enabled: true
+      
+      ComputeSettings:
+        LocalStorage:
+          RootVolume:
+            Size: 300
+          EphemeralVolume:
+            MountDir: /scratch
+      
+      CustomActions:
+        OnNodeConfigured:
+          Script: s3://my-bucket/scripts/setup_deepspeed.sh
+      
+      Iam:
+        AdditionalIamPolicies:
+          - Policy: arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+          - Policy: arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+SharedStorage:
+  - MountDir: /fsx
+    Name: fsx-storage
+    StorageType: FsxLustre
+    FsxLustreSettings:
+      StorageCapacity: 7200  # 7.2TB
+      DeploymentType: PERSISTENT_2
+      PerUnitStorageThroughput: 250
+      DataCompressionType: LZ4
+      ImportPath: s3://my-bucket/training-data
+      ExportPath: s3://my-bucket/training-output
+
+Monitoring:
+  DetailedMonitoring: true
+  Logs:
+    CloudWatch:
+      Enabled: true
+      RetentionInDays: 14
+
+Tags:
+  - Key: Project
+    Value: MultiFrameworkTraining
+  - Key: Environment
+    Value: Production
+
+🎯 각 큐별 최적화 전략
+1️⃣ DDP Queue (빠른 반복, 작은 모델)
+#!/bin/bash
+# scripts/train_ddp_multi_queue.sh
+
+#SBATCH --job-name=ddp-gpt2
+#SBATCH --partition=ddp-queue          # DDP 전용 큐
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --exclusive
+#SBATCH --time=12:00:00                # 12시간 제한
+#SBATCH --output=logs/ddp/%x_%j.out
+
+# DDP 최적화 환경 변수
+export NCCL_DEBUG=INFO
+export NCCL_IB_DISABLE=0
+export NCCL_NET_GDR_LEVEL=5
+export NCCL_SOCKET_IFNAME=^docker0,lo
+
+# EFA 최적화
+export FI_PROVIDER=efa
+export FI_EFA_USE_DEVICE_RDMA=1
+export NCCL_PROTO=simple
+
+declare -a CONTAINER_ARGS=(
+    --container-image=/fsx/containers/ddp.sqsh
+    --container-mounts=/fsx:/fsx
+)
+
+declare -a TORCHRUN_ARGS=(
+    --nproc_per_node=8
+    --nnodes=$SLURM_JOB_NUM_NODES
+    --rdzv_id=$SLURM_JOB_ID
+    --rdzv_backend=c10d
+    --rdzv_endpoint=$(scontrol show hostname $SLURM_NODELIST | head -n1)
+)
+
+srun -l "${CONTAINER_ARGS[@]}" \
+    torchrun "${TORCHRUN_ARGS[@]}" \
+    train_ddp.py \
+    --model gpt2-medium \
+    --data-path /fsx/data/wikitext \
+    --output-dir /fsx/checkpoints/ddp \
+    --batch-size 32
+
+2️⃣ Megatron Queue (대규모 모델)
+#!/bin/bash
+# scripts/train_megatron_multi_queue.sh
+
+#SBATCH --job-name=megatron-gpt3
+#SBATCH --partition=megatron-queue      # Megatron 전용 큐
+#SBATCH --nodes=32                      # 더 많은 노드
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --exclusive
+#SBATCH --time=72:00:00                 # 3일 제한
+#SBATCH --output=logs/megatron/%x_%j.out
+
+# Megatron 최적화
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export NCCL_IB_DISABLE=0
+export NCCL_NET_GDR_LEVEL=5
+
+# EFA 최적화
+export FI_PROVIDER=efa
+export FI_EFA_USE_DEVICE_RDMA=1
+export NCCL_PROTO=simple
+
+declare -a CONTAINER_ARGS=(
+    --container-image=/fsx/containers/megatron.sqsh
+    --container-mounts=/fsx:/fsx
+)
+
+# 256 GPUs 기준 병렬화 설정
+TENSOR_PARALLEL=8
+PIPELINE_PARALLEL=8
+# DATA_PARALLEL = 256 / (8 * 8) = 4
+
+srun -l "${CONTAINER_ARGS[@]}" \
+    pretrain_gpt.py \
+    --tensor-model-parallel-size $TENSOR_PARALLEL \
+    --pipeline-model-parallel-size $PIPELINE_PARALLEL \
+    --num-layers 96 \
+    --hidden-size 12288 \
+    --num-attention-heads 96 \
+    --seq-length 2048 \
+    --micro-batch-size 1 \
+    --global-batch-size 1024 \
+    --train-iters 500000 \
+    --data-path /fsx/data/megatron/gpt3_text_document \
+    --save /fsx/checkpoints/megatron \
+    --fp16
+
+3️⃣ DeepSpeed Queue (메모리 효율)
+#!/bin/bash
+# scripts/train_deepspeed_multi_queue.sh
+
+#SBATCH --job-name=deepspeed-bloom
+#SBATCH --partition=deepspeed-queue     # DeepSpeed 전용 큐
+#SBATCH --nodes=16
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --exclusive
+#SBATCH --time=48:00:00                 # 2일 제한
+#SBATCH --output=logs/deepspeed/%x_%j.out
+
+# DeepSpeed 최적화
+export NCCL_IB_DISABLE=0
+export NCCL_NET_GDR_LEVEL=5
+
+# EFA 최적화
+export FI_PROVIDER=efa
+export FI_EFA_USE_DEVICE_RDMA=1
+
+declare -a CONTAINER_ARGS=(
+    --container-image=/fsx/containers/deepspeed.sqsh
+    --container-mounts=/fsx:/fsx
+)
+
+srun -l "${CONTAINER_ARGS[@]}" \
+    --launcher=pytorch \
+    train_deepspeed.py \
+    --deepspeed \
+    --deepspeed_config /fsx/configs/ds_config_zero3_offload.json \
+    --model bloom-7b1 \
+    --data-path /fsx/data/pile \
+    --output-dir /fsx/checkpoints/deepspeed \
+    --per-device-train-batch-size 4 \
+    --gradient-accumulation-steps 8 \
+    --fp16
+
+🎛️ 고급: 동적 리소스 할당
+Slurm 큐 우선순위 설정
+# 헤드 노드에서 실행
+# /opt/slurm/etc/slurm.conf 수정
+
+# 큐별 우선순위 설정
+PartitionName=megatron-queue Priority=1000 Default=NO MaxTime=72:00:00
+PartitionName=deepspeed-queue Priority=800 Default=NO MaxTime=48:00:00
+PartitionName=ddp-queue Priority=600 Default=YES MaxTime=12:00:00
+
+# QoS 설정 (Quality of Service)
+# /opt/slurm/etc/slurm_qos.conf
+sacctmgr add qos high_priority priority=1000
+sacctmgr add qos medium_priority priority=800
+sacctmgr add qos low_priority priority=600
+
+# 큐에 QoS 적용
+sacctmgr modify partition megatron-queue set qos=high_priority
+sacctmgr modify partition deepspeed-queue set qos=medium_priority
+sacctmgr modify partition ddp-queue set qos=low_priority
+
+리소스 제한 설정
+# 사용자별 동시 작업 제한
+sacctmgr modify user myuser set MaxJobs=5
+
+# 큐별 최대 노드 수 제한
+sacctmgr modify partition megatron-queue set MaxNodes=50
+sacctmgr modify partition deepspeed-queue set MaxNodes=30
+sacctmgr modify partition ddp-queue set MaxNodes=20
+
+# 큐별 최대 실행 시간
+sacctmgr modify partition megatron-queue set MaxTime=72:00:00
+sacctmgr modify partition deepspeed-queue set MaxTime=48:00:00
+sacctmgr modify partition ddp-queue set MaxTime=12:00:00
+
+📊 리소스 모니터링 대시보드
+#!/bin/bash
+# scripts/monitor_multi_queue.sh
+
+watch -n 5 '
+echo "=== ParallelCluster Multi-Queue Status ==="
+echo ""
+echo "=== Queue Status ==="
+sinfo -o "%20P %5a %10l %6D %6t %8z %10C %20N"
+echo ""
+
+echo "=== Running Jobs by Queue ==="
+squeue -o "%.10i %.15j %.12u %.10P %.8T %.10M %.6D %R" --sort=P
+echo ""
+
+echo "=== Resource Utilization ==="
+for queue in ddp-queue megatron-queue deepspeed-queue; do
+    echo "--- $queue ---"
+    running=$(squeue -p $queue -t RUNNING -h | wc -l)
+    pending=$(squeue -p $queue -t PENDING -h | wc -l)
+    nodes=$(sinfo -p $queue -h -o "%D")
+    echo "  Running Jobs: $running"
+    echo "  Pending Jobs: $pending"
+    echo "  Active Nodes: $nodes"
+    echo ""
+done
+
+echo "=== GPU Utilization (Sample) ==="
+for queue in ddp-queue megatron-queue deepspeed-queue; do
+    job=$(squeue -p $queue -t RUNNING -h -o "%i" | head -n1)
+    if [ ! -z "$job" ]; then
+        echo "--- $queue (Job $job) ---"
+        srun --jobid=$job --overlap nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader 2>/dev/null | head -n 4
+        echo ""
+    fi
+done
+'
+
+💰 비용 최적화 전략
+1. ODCR 활용 극대화
+# 100개 인스턴스 ODCR 분배 전략
+
+Megatron Queue (우선순위 높음):
+  - p4de.24xlarge × 50개
+  - 가장 큰 모델, 가장 많은 리소스
+  - ODCR 50% 할당
+
+DeepSpeed Queue (중간 우선순위):
+  - p4d.24xlarge × 30개
+  - 메모리 효율적 학습
+  - ODCR 30% 할당
+
+DDP Queue (우선순위 낮음):
+  - p4d.24xlarge × 20개
+  - 빠른 반복 실험
+  - ODCR 20% 할당
+
+2. 스팟 인스턴스 혼합 (선택적)
+# 실험적 작업은 스팟 사용
+SlurmQueues:
+  - Name: ddp-spot-queue
+    CapacityType: SPOT
+    AllocationStrategy: capacity-optimized
+    
+    ComputeResources:
+      - Name: ddp-spot-compute
+        InstanceType: p4d.24xlarge
+        MinCount: 0
+        MaxCount: 10
+    
+    # 스팟 중단 시 자동 재시작
+    CustomActions:
+      OnNodeConfigured:
+        Script: s3://my-bucket/scripts/checkpoint_resume.sh
+
+3. 자동 스케일다운
+Scheduling:
+  SlurmSettings:
+    ScaledownIdletime: 10  # 10분 유휴 후 종료
+    
+    # 큐별 다른 설정
+    CustomSlurmSettings:
+      - Queue: megatron-queue
+        ScaledownIdletime: 30  # 30분 (큰 작업 고려)
+      - Queue: ddp-queue
+        ScaledownIdletime: 5   # 5분 (빠른 회전)
+
+🔧 통합 제출 스크립트
+#!/bin/bash
+# scripts/submit_all_multi_queue.sh
+
+set -e
+
+echo "=== Multi-Queue Training Submission ==="
+echo ""
+
+# 작업 우선순위 확인
+echo "Queue Priorities:"
+scontrol show partition | grep -E "PartitionName|Priority"
+echo ""
+
+# 1. Megatron (최고 우선순위)
+echo "Submitting Megatron job..."
+JOB_MEGA=$(sbatch --parsable scripts/train_megatron_multi_queue.sh)
+echo "  Megatron: Job $JOB_MEGA (megatron-queue)"
+
+# 2. DeepSpeed (중간 우선순위)
+echo "Submitting DeepSpeed job..."
+JOB_DS=$(sbatch --parsable scripts/train_deepspeed_multi_queue.sh)
+echo "  DeepSpeed: Job $JOB_DS (deepspeed-queue)"
+
+# 3. DDP (낮은 우선순위)
+echo "Submitting DDP job..."
+JOB_DDP=$(sbatch --parsable scripts/train_ddp_multi_queue.sh)
+echo "  DDP: Job $JOB_DDP (ddp-queue)"
+
+echo ""
+echo "=== Job Status ==="
+squeue -j $JOB_MEGA,$JOB_DS,$JOB_DDP
+
+echo ""
+echo "=== Cluster Status ==="
+sinfo -o "%20P %5a %10l %6D %6t"
+
+echo ""
+echo "Monitor with: bash scripts/monitor_multi_queue.sh"
+
+📈 성능 벤치마크 예시
+예상 리소스 사용 (100개 인스턴스 ODCR)
+시나리오: 3개 작업 동시 실행
+
+Megatron (GPT-3 175B):
+├─ 큐: megatron-queue
+├─ 인스턴스: 50 × p4de.24xlarge
+├─ GPUs: 400 × A100 80GB
+├─ 학습 시간: 60일 → 3일 (20배 가속)
+└─ 비용: ODCR 50% 활용
+
+DeepSpeed (BLOOM 176B):
+├─ 큐: deepspeed-queue
+├─ 인스턴스: 30 × p4d.24xlarge
+├─ GPUs: 240 × A100 40GB
+├─ 학습 시간: 45일 → 2.5일 (18배 가속)
+└─ 비용: ODCR 30% 활용
+
+DDP (GPT-2 1.5B):
+├─ 큐: ddp-queue
+├─ 인스턴스: 20 × p4d.24xlarge
+├─ GPUs: 160 × A100 40GB
+├─ 학습 시간: 7일 → 8시간 (21배 가속)
+└─ 비용: ODCR 20% 활용
+
+총 활용률: 100% (ODCR 완전 활용)
+
+🎓 최종 권장사항
+✅ 다중 큐를 사용해야 하는 이유 (당신의 경우)
+
+    100개 ODCR 최적 활용 - 큐별로 명확한 리소스 분배 - 우선순위에 따른 자동 할당
+
+    프레임워크별 최적화 - Megatron: p4de (80GB 메모리) - DDP/DeepSpeed: p4d (40GB 메모리)
+
+    장애 격리 - Megatron 작업 실패 → DDP/DeepSpeed 영향 없음 - 독립적인 디버깅 가능
+
+    유연한 스케일링 - 긴급 작업 시 특정 큐에 리소스 집중 - 동적 우선순위 조정
+
+    비용 최적화 - 큐별 다른 스케일다운 정책 - 사용하지 않는 리소스 즉시 반환
+
+구현 순서
+1. ParallelCluster 다중 큐 설정
+   └─ config.yaml 작성 및 클러스터 생성
+
+2. 각 큐별 초기화 스크립트 준비
+   └─ setup_ddp.sh, setup_megatron.sh, setup_deepspeed.sh
+
+3. 컨테이너 이미지 FSx에 배포
+   └─ ECR → Enroot → FSx
+
+4. 큐별 학습 스크립트 작성
+   └─ --partition 옵션으로 큐 지정
+
+5. 모니터링 대시보드 구축
+   └─ CloudWatch + Slurm 메트릭
+
+6. 작업 제출 및 모니터링
+   └─ 3개 작업 동시 실행
+
+    📝 Note: 이 가이드는 AWS ParallelCluster 3.x + Slurm + 대규모 ODCR 환경에서의 베스트 프랙티스를 바탕으로 작성되었습니다.
+
+결론: 100개 ODCR 인스턴스 환경에서는 다중 큐 전략이 압도적으로 유리합니다. 리소스 격리, 우선순위 관리, 비용 최적화 모든 면에서 단일 큐보다 월등합니다! 🚀
+Advanced
+Connected
