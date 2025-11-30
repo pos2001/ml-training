@@ -1,6 +1,6 @@
 
 
-DDP, Megatron, DeepSpeed 분산 학습 가이드
+## DDP, Megatron, DeepSpeed 분산 학습 가이드
 
 3가지 서로 다른 분산 학습 프레임워크를 Enroot/Pyxis 환경에서 실행하는 방법을 알려드리겠습니다.
 🎯 3가지 프레임워크 이해
