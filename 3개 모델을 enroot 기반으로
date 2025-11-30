@@ -1,0 +1,639 @@
+
+
+DDP, Megatron, DeepSpeed 분산 학습 가이드
+
+3가지 서로 다른 분산 학습 프레임워크를 Enroot/Pyxis 환경에서 실행하는 방법을 알려드리겠습니다.
+🎯 3가지 프레임워크 이해
+DDP (Distributed Data Parallel)
+├─ 데이터 병렬화
+├─ 모델 복제 (각 GPU에 전체 모델)
+└─ 소규모~중규모 모델에 적합
+
+Megatron-LM
+├─ 텐서 병렬화 + 파이프라인 병렬화
+├─ 모델 분할 (여러 GPU에 나눠서)
+└─ 초대규모 모델 (GPT, BERT 등)
+
+DeepSpeed (DDP2 아님, DeepSpeed가 맞음)
+├─ ZeRO 최적화 (메모리 효율)
+├─ 다양한 병렬화 기법 통합
+└─ 메모리 제약이 큰 환경
+
+    참고: DDP2는 PyTorch Lightning의 구식 용어입니다. 현재는 DeepSpeed나 FSDP(Fully Sharded Data Parallel)를 사용합니다.
+
+📦 1. 각 프레임워크별 컨테이너 이미지
+1️⃣ DDP Dockerfile
+# containers/ddp/Dockerfile
+FROM nvcr.io/nvidia/pytorch:24.01-py3
+
+LABEL description="PyTorch DDP Training Container"
+
+# DDP 관련 패키지
+RUN pip install --no-cache-dir \
+    torch==2.2.0 \
+    torchvision==0.17.0 \
+    transformers==4.37.0 \
+    datasets==2.16.0 \
+    wandb==0.16.2 \
+    tensorboard==2.15.0
+
+# NCCL 최적화 설정
+ENV NCCL_DEBUG=INFO
+ENV NCCL_IB_DISABLE=0
+ENV NCCL_NET_GDR_LEVEL=5
+
+# 코드 복사
+COPY training/ddp/ /workspace/ddp/
+WORKDIR /workspace/ddp
+
+ENTRYPOINT ["python"]
+
+2️⃣ Megatron-LM Dockerfile
+# containers/megatron/Dockerfile
+FROM nvcr.io/nvidia/pytorch:24.01-py3
+
+LABEL description="Megatron-LM Training Container"
+
+# Apex 설치 (혼합 정밀도 학습)
+RUN git clone https://github.com/NVIDIA/apex && \
+    cd apex && \
+    pip install -v --disable-pip-version-check --no-cache-dir \
+    --no-build-isolation \
+    --config-settings "--build-option=--cpp_ext" \
+    --config-settings "--build-option=--cuda_ext" ./
+
+# Megatron-LM 설치
+RUN git clone https://github.com/NVIDIA/Megatron-LM.git /workspace/Megatron-LM && \
+    cd /workspace/Megatron-LM && \
+    pip install -e .
+
+# 추가 의존성
+RUN pip install --no-cache-dir \
+    nltk==3.8.1 \
+    sentencepiece==0.1.99 \
+    wandb==0.16.2
+
+# NCCL 및 Megatron 최적화
+ENV NCCL_DEBUG=INFO
+ENV CUDA_DEVICE_MAX_CONNECTIONS=1
+ENV NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
+
+WORKDIR /workspace/Megatron-LM
+
+ENTRYPOINT ["python"]
+
+3️⃣ DeepSpeed Dockerfile
+# containers/deepspeed/Dockerfile
+FROM nvcr.io/nvidia/pytorch:24.01-py3
+
+LABEL description="DeepSpeed Training Container"
+
+# DeepSpeed 설치
+RUN pip install --no-cache-dir \
+    deepspeed==0.13.1 \
+    transformers==4.37.0 \
+    datasets==2.16.0 \
+    accelerate==0.26.0 \
+    wandb==0.16.2
+
+# DeepSpeed 최적화 빌드 (선택)
+RUN DS_BUILD_OPS=1 pip install deepspeed --no-cache-dir --force-reinstall
+
+# NCCL 설정
+ENV NCCL_DEBUG=INFO
+ENV NCCL_IB_DISABLE=0
+
+# 코드 복사
+COPY training/deepspeed/ /workspace/deepspeed/
+WORKDIR /workspace/deepspeed
+
+ENTRYPOINT ["deepspeed"]
+
+🚀 2. ECR에 빌드 & 푸시
+#!/bin/bash
+# scripts/build_all_frameworks.sh
+
+set -e
+
+AWS_ACCOUNT_ID="123456789012"
+AWS_REGION="us-east-1"
+ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+# ECR 로그인
+aws ecr get-login-password --region ${AWS_REGION} | \
+    docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+# 프레임워크 목록
+FRAMEWORKS=("ddp" "megatron" "deepspeed")
+
+for FW in "${FRAMEWORKS[@]}"; do
+    echo ""
+    echo "=== Building ${FW} ==="
+    
+    # ECR 리포지토리 생성
+    aws ecr describe-repositories \
+        --repository-names "ml-frameworks/${FW}" \
+        --region ${AWS_REGION} 2>/dev/null || \
+    aws ecr create-repository \
+        --repository-name "ml-frameworks/${FW}" \
+        --region ${AWS_REGION}
+    
+    # Docker 빌드
+    docker build \
+        -t ${FW}:latest \
+        -f containers/${FW}/Dockerfile \
+        .
+    
+    # 태그 & 푸시
+    docker tag ${FW}:latest \
+        ${ECR_REGISTRY}/ml-frameworks/${FW}:latest
+    
+    docker push ${ECR_REGISTRY}/ml-frameworks/${FW}:latest
+    
+    echo "✓ ${FW} 이미지 푸시 완료"
+done
+
+📥 3. Enroot로 Import
+#!/bin/bash
+# scripts/import_frameworks.sh
+
+set -e
+
+AWS_ACCOUNT_ID="123456789012"
+AWS_REGION="us-east-1"
+ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+# ECR 인증
+aws ecr get-login-password --region ${AWS_REGION} | \
+    enroot-credentials set \
+    --username AWS \
+    --password-stdin \
+    ${ECR_REGISTRY}
+
+mkdir -p containers
+
+# Import
+FRAMEWORKS=("ddp" "megatron" "deepspeed")
+
+for FW in "${FRAMEWORKS[@]}"; do
+    echo "=== Importing ${FW} ==="
+    
+    enroot import \
+        --output containers/${FW}.sqsh \
+        docker://${ECR_REGISTRY}/ml-frameworks/${FW}:latest
+    
+    echo "✓ ${FW}.sqsh 생성 완료"
+done
+
+ls -lh containers/*.sqsh
+
+🎓 4. 각 프레임워크별 학습 스크립트
+1️⃣ PyTorch DDP 학습
+#!/bin/bash
+# scripts/train_ddp.sh
+
+#SBATCH --job-name=ddp-training
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=12
+#SBATCH --exclusive
+#SBATCH --output=logs/ddp/%x_%j.out
+
+export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n1)
+export MASTER_PORT=29500
+
+declare -a CONTAINER_ARGS=(
+    --container-image=${PWD}/containers/ddp.sqsh
+    --container-mounts=${PWD}/data:/data,${PWD}/checkpoints:/checkpoints
+)
+
+declare -a TORCHRUN_ARGS=(
+    --nproc_per_node=8
+    --nnodes=$SLURM_JOB_NUM_NODES
+    --node_rank=$SLURM_NODEID
+    --rdzv_id=$SLURM_JOB_ID
+    --rdzv_backend=c10d
+    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT
+)
+
+# DDP 학습 실행
+srun -l "${CONTAINER_ARGS[@]}" \
+    torchrun "${TORCHRUN_ARGS[@]}" \
+    train_ddp.py \
+    --model-name gpt2-medium \
+    --data-path /data/wikitext \
+    --checkpoint-dir /checkpoints/ddp \
+    --batch-size 32 \
+    --epochs 10 \
+    --lr 3e-4
+
+2️⃣ Megatron-LM 학습
+#!/bin/bash
+# scripts/train_megatron.sh
+
+#SBATCH --job-name=megatron-training
+#SBATCH --nodes=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=12
+#SBATCH --exclusive
+#SBATCH --output=logs/megatron/%x_%j.out
+
+export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n1)
+export MASTER_PORT=29500
+
+# Megatron 환경 변수
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export NCCL_IB_DISABLE=0
+
+declare -a CONTAINER_ARGS=(
+    --container-image=${PWD}/containers/megatron.sqsh
+    --container-mounts=${PWD}/data:/data,${PWD}/checkpoints:/checkpoints
+)
+
+# Megatron 학습 파라미터
+TENSOR_PARALLEL=4      # 텐서 병렬화 크기
+PIPELINE_PARALLEL=2    # 파이프라인 병렬화 크기
+DATA_PARALLEL=8        # 데이터 병렬화 크기 (자동 계산: 64 GPUs / 4 / 2)
+
+GLOBAL_BATCH_SIZE=2048
+MICRO_BATCH_SIZE=4
+
+# Megatron 실행
+srun -l "${CONTAINER_ARGS[@]}" \
+    pretrain_gpt.py \
+    --tensor-model-parallel-size $TENSOR_PARALLEL \
+    --pipeline-model-parallel-size $PIPELINE_PARALLEL \
+    --num-layers 24 \
+    --hidden-size 2048 \
+    --num-attention-heads 16 \
+    --seq-length 2048 \
+    --max-position-embeddings 2048 \
+    --micro-batch-size $MICRO_BATCH_SIZE \
+    --global-batch-size $GLOBAL_BATCH_SIZE \
+    --train-iters 100000 \
+    --lr 1.5e-4 \
+    --min-lr 1.0e-5 \
+    --lr-decay-style cosine \
+    --lr-warmup-iters 2000 \
+    --weight-decay 0.1 \
+    --clip-grad 1.0 \
+    --fp16 \
+    --data-path /data/megatron/my-gpt2_text_document \
+    --vocab-file /data/megatron/gpt2-vocab.json \
+    --merge-file /data/megatron/gpt2-merges.txt \
+    --save /checkpoints/megatron \
+    --load /checkpoints/megatron \
+    --save-interval 1000 \
+    --eval-interval 100 \
+    --eval-iters 10 \
+    --distributed-backend nccl
+
+3️⃣ DeepSpeed 학습
+#!/bin/bash
+# scripts/train_deepspeed.sh
+
+#SBATCH --job-name=deepspeed-training
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=12
+#SBATCH --exclusive
+#SBATCH --output=logs/deepspeed/%x_%j.out
+
+export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n1)
+export MASTER_PORT=29500
+
+declare -a CONTAINER_ARGS=(
+    --container-image=${PWD}/containers/deepspeed.sqsh
+    --container-mounts=${PWD}/data:/data,${PWD}/checkpoints:/checkpoints,${PWD}/configs:/configs
+)
+
+# DeepSpeed hostfile 생성
+cat > /tmp/hostfile_${SLURM_JOB_ID} << EOF
+$(scontrol show hostname $SLURM_NODELIST | awk '{print $1" slots=8"}')
+EOF
+
+# DeepSpeed 실행
+srun -l "${CONTAINER_ARGS[@]}" \
+    --launcher=pytorch \
+    train_deepspeed.py \
+    --deepspeed \
+    --deepspeed_config /configs/ds_config_zero3.json \
+    --model-name gpt2-large \
+    --data-path /data/wikitext \
+    --output-dir /checkpoints/deepspeed \
+    --per-device-train-batch-size 8 \
+    --gradient-accumulation-steps 4 \
+    --num-train-epochs 3 \
+    --learning-rate 5e-5 \
+    --fp16 \
+    --logging-steps 10 \
+    --save-steps 1000
+
+⚙️ 5. DeepSpeed 설정 파일들
+ZeRO Stage 1 (Optimizer State Partitioning)
+{
+  "train_batch_size": 256,
+  "train_micro_batch_size_per_gpu": 8,
+  "gradient_accumulation_steps": 4,
+  "optimizer": {
+    "type": "AdamW",
+    "params": {
+      "lr": 3e-4,
+      "betas": [0.9, 0.999],
+      "eps": 1e-8,
+      "weight_decay": 0.01
+    }
+  },
+  "scheduler": {
+    "type": "WarmupLR",
+    "params": {
+      "warmup_min_lr": 0,
+      "warmup_max_lr": 3e-4,
+      "warmup_num_steps": 1000
+    }
+  },
+  "fp16": {
+    "enabled": true,
+    "loss_scale": 0,
+    "initial_scale_power": 16,
+    "loss_scale_window": 1000,
+    "hysteresis": 2,
+    "min_loss_scale": 1
+  },
+  "zero_optimization": {
+    "stage": 1,
+    "allgather_partitions": true,
+    "allgather_bucket_size": 5e8,
+    "reduce_scatter": true,
+    "reduce_bucket_size": 5e8,
+    "overlap_comm": true,
+    "contiguous_gradients": true
+  },
+  "gradient_clipping": 1.0,
+  "steps_per_print": 10,
+  "wall_clock_breakdown": false
+}
+
+ZeRO Stage 2 (+ Gradient Partitioning)
+{
+  "train_batch_size": 256,
+  "train_micro_batch_size_per_gpu": 4,
+  "gradient_accumulation_steps": 8,
+  "optimizer": {
+    "type": "AdamW",
+    "params": {
+      "lr": 3e-4,
+      "betas": [0.9, 0.999],
+      "eps": 1e-8,
+      "weight_decay": 0.01
+    }
+  },
+  "fp16": {
+    "enabled": true
+  },
+  "zero_optimization": {
+    "stage": 2,
+    "offload_optimizer": {
+      "device": "cpu",
+      "pin_memory": true
+    },
+    "allgather_partitions": true,
+    "allgather_bucket_size": 5e8,
+    "reduce_scatter": true,
+    "reduce_bucket_size": 5e8,
+    "overlap_comm": true,
+    "contiguous_gradients": true
+  },
+  "gradient_clipping": 1.0
+}
+
+ZeRO Stage 3 (+ Parameter Partitioning)
+{
+  "train_batch_size": 256,
+  "train_micro_batch_size_per_gpu": 2,
+  "gradient_accumulation_steps": 16,
+  "optimizer": {
+    "type": "AdamW",
+    "params": {
+      "lr": 3e-4,
+      "betas": [0.9, 0.999],
+      "eps": 1e-8,
+      "weight_decay": 0.01
+    }
+  },
+  "fp16": {
+    "enabled": true
+  },
+  "zero_optimization": {
+    "stage": 3,
+    "offload_optimizer": {
+      "device": "cpu",
+      "pin_memory": true
+    },
+    "offload_param": {
+      "device": "cpu",
+      "pin_memory": true
+    },
+    "overlap_comm": true,
+    "contiguous_gradients": true,
+    "sub_group_size": 1e9,
+    "reduce_bucket_size": 5e8,
+    "stage3_prefetch_bucket_size": 5e8,
+    "stage3_param_persistence_threshold": 1e6,
+    "stage3_max_live_parameters": 1e9,
+    "stage3_max_reuse_distance": 1e9,
+    "stage3_gather_16bit_weights_on_model_save": true
+  },
+  "gradient_clipping": 1.0,
+  "activation_checkpointing": {
+    "partition_activations": true,
+    "cpu_checkpointing": true,
+    "contiguous_memory_optimization": false,
+    "number_checkpoints": null,
+    "synchronize_checkpoint_boundary": false,
+    "profile": false
+  }
+}
+
+📊 6. 비교 및 선택 가이드
+프레임워크 선택 기준
+프레임워크	모델 크기	GPU 메모리	통신 오버헤드	구현 난이도
+DDP	~1B params	충분	낮음	⭐ 쉬움
+Megatron	10B+ params	부족	중간	⭐⭐⭐⭐ 어려움
+DeepSpeed	1B~100B+	부족	낮음	⭐⭐⭐ 중간
+사용 시나리오
+DDP 사용:
+✅ 모델이 단일 GPU에 들어감
+✅ 빠른 프로토타이핑 필요
+✅ 간단한 데이터 병렬화만 필요
+예: ResNet, BERT-Base, GPT-2 Small
+
+Megatron 사용:
+✅ 초대규모 모델 (10B+ parameters)
+✅ 텐서/파이프라인 병렬화 필요
+✅ NVIDIA GPU 인프라
+예: GPT-3, Megatron-Turing NLG
+
+DeepSpeed 사용:
+✅ 메모리 효율이 중요
+✅ 다양한 병렬화 기법 조합
+✅ CPU 오프로딩 활용
+예: GPT-Neo, BLOOM, OPT
+
+🔧 7. 통합 실행 스크립트
+#!/bin/bash
+# scripts/train_all_frameworks.sh
+
+set -e
+
+echo "=== Multi-Framework Training Pipeline ==="
+echo ""
+
+# 1. 컨테이너 준비 확인
+echo "Step 1: Checking containers..."
+for fw in ddp megatron deepspeed; do
+    if [ ! -f "containers/${fw}.sqsh" ]; then
+        echo "Error: ${fw}.sqsh not found"
+        exit 1
+    fi
+done
+echo "✓ All containers ready"
+
+# 2. 로그 디렉토리
+mkdir -p logs/{ddp,megatron,deepspeed}
+
+# 3. 작업 제출
+echo ""
+echo "Step 2: Submitting jobs..."
+
+# DDP (작은 모델, 빠른 실행)
+JOB_DDP=$(sbatch --parsable scripts/train_ddp.sh)
+echo "  DDP:       Job $JOB_DDP"
+
+# Megatron (큰 모델, 많은 리소스)
+JOB_MEGA=$(sbatch --parsable scripts/train_megatron.sh)
+echo "  Megatron:  Job $JOB_MEGA"
+
+# DeepSpeed (메모리 효율)
+JOB_DS=$(sbatch --parsable scripts/train_deepspeed.sh)
+echo "  DeepSpeed: Job $JOB_DS"
+
+# 4. 모니터링
+echo ""
+echo "Step 3: Monitoring..."
+squeue -j $JOB_DDP,$JOB_MEGA,$JOB_DS
+
+# 5. 실시간 로그 확인 (선택)
+echo ""
+echo "실시간 로그 확인 (Ctrl+C로 종료):"
+echo "  tail -f logs/ddp/*_${JOB_DDP}.out"
+echo "  tail -f logs/megatron/*_${JOB_MEGA}.out"
+echo "  tail -f logs/deepspeed/*_${JOB_DS}.out"
+
+🎯 8. 성능 최적화 팁
+DDP 최적화
+# train_ddp.py
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+# 1. Gradient bucketing
+model = DDP(
+    model,
+    device_ids=[local_rank],
+    bucket_cap_mb=25,  # 그래디언트 버킷 크기
+    find_unused_parameters=False  # 사용하지 않는 파라미터 찾기 비활성화
+)
+
+# 2. 혼합 정밀도
+from torch.cuda.amp import autocast, GradScaler
+scaler = GradScaler()
+
+for batch in dataloader:
+    with autocast():
+        loss = model(batch)
+    
+    scaler.scale(loss).backward()
+    scaler.step(optimizer)
+    scaler.update()
+
+# 3. Gradient accumulation
+for i, batch in enumerate(dataloader):
+    loss = model(batch) / accumulation_steps
+    loss.backward()
+    
+    if (i + 1) % accumulation_steps == 0:
+        optimizer.step()
+        optimizer.zero_grad()
+
+Megatron 최적화
+# 최적의 병렬화 조합 찾기
+# TP × PP × DP = Total GPUs
+
+# 예: 64 GPUs
+--tensor-model-parallel-size 8    # TP=8
+--pipeline-model-parallel-size 4  # PP=4
+# DP = 64 / (8 × 4) = 2 (자동)
+
+# Activation checkpointing (메모리 절약)
+--checkpoint-activations \
+--checkpoint-num-layers 1
+
+DeepSpeed 최적화
+{
+  "zero_optimization": {
+    "stage": 3,
+    "overlap_comm": true,           // 통신 오버랩
+    "contiguous_gradients": true,   // 그래디언트 연속 메모리
+    "sub_group_size": 1e9,          // 서브 그룹 크기
+    "reduce_bucket_size": 5e8,      // Reduce 버킷 크기
+    "stage3_prefetch_bucket_size": 5e8,  // Prefetch 버킷
+    "stage3_max_live_parameters": 1e9,   // 최대 라이브 파라미터
+    "stage3_max_reuse_distance": 1e9     // 재사용 거리
+  },
+  "comms_logger": {
+    "enabled": true,
+    "verbose": false,
+    "prof_all": false,
+    "debug": false
+  }
+}
+
+📈 9. 모니터링 및 디버깅
+통합 모니터링 스크립트
+#!/bin/bash
+# scripts/monitor_all.sh
+
+watch -n 5 '
+echo "=== Running Jobs ==="
+squeue -u $USER -o "%.10i %.15j %.8T %.10M %.6D %.20R"
+echo ""
+
+echo "=== GPU Utilization ==="
+for job in $(squeue -u $USER -h -o "%i"); do
+    echo "Job $job:"
+    srun --jobid=$job --overlap nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader 2>/dev/null | head -n 4
+    echo ""
+done
+
+echo "=== Latest Logs ==="
+for fw in ddp megatron deepspeed; do
+    latest=$(ls -t logs/${fw}/*.out 2>/dev/null | head -n1)
+    if [ -f "$latest" ]; then
+        echo "${fw^^}: $(tail -n 1 $latest)"
+    fi
+done
+'
+
+🎓 최종 정리
+전체 워크플로우
+1. Dockerfile 작성 (각 프레임워크별) ├─ ddp/Dockerfile ├─ megatron/Dockerfile └─ deepspeed/Dockerfile
+
+2. ECR에 빌드 & 푸시 └─ bash scripts/build_all_frameworks.sh
+
+3. Enroot로 import └─ bash scripts/import_frameworks.sh
+
+4. 학습 실행
