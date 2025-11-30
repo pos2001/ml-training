@@ -1,0 +1,598 @@
+단일 큐에서 slurm accounting을 이용해서 QoS를 적용하면 자원을 좀 더 효율적으로 사용할 수 있을것 같은데
+
+당신 말이 완전히 맞습니다! 단일 큐에서 Slurm Accounting과 QoS를 잘 활용하면 더 효율적인 리소스 관리가 가능합니다.
+🔄 전략 재평가
+다중 큐 vs 단일 큐 + QoS
+측면	다중 큐	단일 큐 + QoS ✅
+리소스 활용률	70-80% (큐별 고정 할당)	90-95% (동적 공유)
+유휴 리소스	많음 (큐 간 이동 불가)	적음 (전체 풀 공유)
+우선순위 관리	큐 레벨	세밀한 제어 (QoS)
+설정 복잡도	낮음	중간
+유연성	낮음	높음
+ODCR 활용	부분적	최대화
+
+결론: 100개 ODCR을 최대한 활용하려면 단일 큐 + QoS가 더 나음!
+🏗️ 단일 큐 + QoS 아키텍처
+ParallelCluster 설정 (단일 큐)
+Region: us-east-1
+Image:
+  Os: alinux2
+
+HeadNode:
+  InstanceType: c5.4xlarge
+  Networking:
+    SubnetId: subnet-12345678
+  Iam:
+    AdditionalIamPolicies:
+      - Policy: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  LocalStorage:
+    RootVolume:
+      Size: 100
+
+Scheduling:
+  Scheduler: slurm
+  SlurmSettings:
+    ScaledownIdletime: 10
+    QueueUpdateStrategy: TERMINATE
+    
+    # Slurm Accounting 활성화
+    Database:
+      Uri: mysql://slurm:password@mysql-endpoint:3306/slurm_acct_db
+      UserName: slurm
+      PasswordSecretArn: arn:aws:secretsmanager:us-east-1:123456789012:secret:slurm-db-pass
+    
+  SlurmQueues:
+    # ============================================
+    # 단일 통합 큐 - 모든 워크로드 공유
+    # ============================================
+    - Name: compute
+      CapacityType: ONDEMAND
+      AllocationStrategy: lowest-price
+      
+      ComputeResources:
+        # 다양한 인스턴스 타입 혼합 (유연성)
+        - Name: a100-80gb
+          InstanceType: p4de.24xlarge  # 8x A100 80GB
+          MinCount: 0
+          MaxCount: 50
+          DisableSimultaneousMultithreading: true
+          Efa:
+            Enabled: true
+            GdrSupport: true
+        
+        - Name: a100-40gb
+          InstanceType: p4d.24xlarge   # 8x A100 40GB
+          MinCount: 0
+          MaxCount: 50
+          DisableSimultaneousMultithreading: true
+          Efa:
+            Enabled: true
+            GdrSupport: true
+      
+      Networking:
+        SubnetIds:
+          - subnet-12345678
+        PlacementGroup:
+          Enabled: true
+      
+      ComputeSettings:
+        LocalStorage:
+          RootVolume:
+            Size: 300
+          EphemeralVolume:
+            MountDir: /scratch
+      
+      Iam:
+        AdditionalIamPolicies:
+          - Policy: arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+SharedStorage:
+  - MountDir: /fsx
+    Name: fsx-storage
+    StorageType: FsxLustre
+    FsxLustreSettings:
+      StorageCapacity: 7200
+      DeploymentType: PERSISTENT_2
+      PerUnitStorageThroughput: 250
+      DataCompressionType: LZ4
+
+Monitoring:
+  DetailedMonitoring: true
+  Logs:
+    CloudWatch:
+      Enabled: true
+
+🎛️ Slurm Accounting & QoS 설정
+1️⃣ Slurm Accounting 초기화
+#!/bin/bash
+# scripts/setup_slurm_accounting.sh
+# 헤드 노드에서 실행
+
+# Slurm Accounting 데몬 시작
+sudo systemctl enable slurmdbd
+sudo systemctl start slurmdbd
+
+# 클러스터 등록
+sacctmgr add cluster mycluster -i
+
+# 계정(Account) 생성
+sacctmgr add account ml_training Description="ML Training Projects" -i
+sacctmgr add account ddp_projects Parent=ml_training -i
+sacctmgr add account megatron_projects Parent=ml_training -i
+sacctmgr add account deepspeed_projects Parent=ml_training -i
+
+# 사용자 추가
+sacctmgr add user myuser Account=ml_training -i
+
+2️⃣ QoS (Quality of Service) 정의
+#!/bin/bash
+# scripts/setup_qos.sh
+
+# ============================================
+# QoS 1: Critical (Megatron - 최고 우선순위)
+# ============================================
+sacctmgr add qos critical \
+    Priority=10000 \
+    MaxWall=7-00:00:00 \
+    MaxJobsPerUser=2 \
+    MaxSubmitJobsPerUser=5 \
+    MaxNodesPerJob=50 \
+    MaxCPUsPerUser=4800 \
+    Flags=DenyOnLimit \
+    Preempt=high,normal,low \
+    -i
+
+# ============================================
+# QoS 2: High (DeepSpeed - 높은 우선순위)
+# ============================================
+sacctmgr add qos high \
+    Priority=5000 \
+    MaxWall=3-00:00:00 \
+    MaxJobsPerUser=3 \
+    MaxSubmitJobsPerUser=8 \
+    MaxNodesPerJob=40 \
+    MaxCPUsPerUser=3840 \
+    Flags=DenyOnLimit \
+    Preempt=normal,low \
+    -i
+
+# ============================================
+# QoS 3: Normal (DDP - 일반 우선순위)
+# ============================================
+sacctmgr add qos normal \
+    Priority=1000 \
+    MaxWall=1-00:00:00 \
+    MaxJobsPerUser=5 \
+    MaxSubmitJobsPerUser=15 \
+    MaxNodesPerJob=30 \
+    MaxCPUsPerUser=2880 \
+    Flags=DenyOnLimit \
+    Preempt=low \
+    -i
+
+# ============================================
+# QoS 4: Low (실험/개발 - 낮은 우선순위)
+# ============================================
+sacctmgr add qos low \
+    Priority=100 \
+    MaxWall=12:00:00 \
+    MaxJobsPerUser=10 \
+    MaxSubmitJobsPerUser=20 \
+    MaxNodesPerJob=10 \
+    MaxCPUsPerUser=960 \
+    Flags=DenyOnLimit \
+    -i
+
+# ============================================
+# QoS 5: Preemptible (선점 가능 - 최저 우선순위)
+# ============================================
+sacctmgr add qos preemptible \
+    Priority=10 \
+    MaxWall=6:00:00 \
+    MaxJobsPerUser=20 \
+    MaxNodesPerJob=5 \
+    Flags=OverPartQOS \
+    -i
+
+echo "QoS 설정 완료!"
+sacctmgr show qos format=Name,Priority,MaxWall,MaxNodes,MaxJobs,Preempt
+
+3️⃣ 계정별 QoS 할당
+#!/bin/bash
+# scripts/assign_qos.sh
+
+# Megatron 프로젝트 → Critical QoS
+sacctmgr modify account megatron_projects set QOS=critical -i
+sacctmgr modify user myuser Account=megatron_projects set QOS=critical -i
+
+# DeepSpeed 프로젝트 → High QoS
+sacctmgr modify account deepspeed_projects set QOS=high -i
+sacctmgr modify user myuser Account=deepspeed_projects set QOS=high -i
+
+# DDP 프로젝트 → Normal QoS
+sacctmgr modify account ddp_projects set QOS=normal -i
+sacctmgr modify user myuser Account=ddp_projects set QOS=normal -i
+
+# 기본 QoS 설정
+sacctmgr modify user myuser set DefaultQOS=normal -i
+
+echo "QoS 할당 완료!"
+sacctmgr show associations format=Account,User,QOS,DefaultQOS
+
+🚀 QoS 기반 학습 스크립트
+1️⃣ Megatron (Critical QoS)
+#!/bin/bash
+# scripts/train_megatron_qos.sh
+
+#SBATCH --job-name=megatron-gpt3
+#SBATCH --partition=compute              # 단일 큐
+#SBATCH --qos=critical                   # Critical QoS 지정
+#SBATCH --account=megatron_projects      # Megatron 계정
+#SBATCH --nodes=50
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --constraint=a100-80gb           # 80GB 메모리 요구
+#SBATCH --exclusive
+#SBATCH --time=7-00:00:00                # 7일
+#SBATCH --output=logs/megatron/%x_%j.out
+
+echo "Job: $SLURM_JOB_ID"
+echo "QoS: critical"
+echo "Priority: 10000"
+echo "Nodes: $SLURM_JOB_NUM_NODES"
+
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export NCCL_IB_DISABLE=0
+
+declare -a CONTAINER_ARGS=(
+    --container-image=/fsx/containers/megatron.sqsh
+    --container-mounts=/fsx:/fsx
+)
+
+# 400 GPUs (50 nodes × 8)
+TENSOR_PARALLEL=8
+PIPELINE_PARALLEL=8
+# DATA_PARALLEL = 400 / (8 * 8) = 6.25 ≈ 6
+
+srun -l "${CONTAINER_ARGS[@]}" \
+    pretrain_gpt.py \
+    --tensor-model-parallel-size $TENSOR_PARALLEL \
+    --pipeline-model-parallel-size $PIPELINE_PARALLEL \
+    --num-layers 96 \
+    --hidden-size 12288 \
+    --num-attention-heads 96 \
+    --micro-batch-size 1 \
+    --global-batch-size 1536 \
+    --train-iters 500000 \
+    --data-path /fsx/data/megatron/gpt3 \
+    --save /fsx/checkpoints/megatron \
+    --fp16
+
+2️⃣ DeepSpeed (High QoS)
+#!/bin/bash
+# scripts/train_deepspeed_qos.sh
+
+#SBATCH --job-name=deepspeed-bloom
+#SBATCH --partition=compute              # 단일 큐
+#SBATCH --qos=high                       # High QoS
+#SBATCH --account=deepspeed_projects
+#SBATCH --nodes=30
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --constraint=a100-40gb           # 40GB로도 충분
+#SBATCH --exclusive
+#SBATCH --time=3-00:00:00                # 3일
+#SBATCH --output=logs/deepspeed/%x_%j.out
+
+echo "Job: $SLURM_JOB_ID"
+echo "QoS: high"
+echo "Priority: 5000"
+echo "Nodes: $SLURM_JOB_NUM_NODES"
+
+export NCCL_IB_DISABLE=0
+
+declare -a CONTAINER_ARGS=(
+    --container-image=/fsx/containers/deepspeed.sqsh
+    --container-mounts=/fsx:/fsx
+)
+
+# 240 GPUs (30 nodes × 8)
+srun -l "${CONTAINER_ARGS[@]}" \
+    --launcher=pytorch \
+    train_deepspeed.py \
+    --deepspeed \
+    --deepspeed_config /fsx/configs/ds_config_zero3.json \
+    --model bloom-176b \
+    --data-path /fsx/data/pile \
+    --output-dir /fsx/checkpoints/deepspeed \
+    --per-device-train-batch-size 2 \
+    --gradient-accumulation-steps 16 \
+    --fp16
+
+3️⃣ DDP (Normal QoS)
+#!/bin/bash
+# scripts/train_ddp_qos.sh
+
+#SBATCH --job-name=ddp-gpt2
+#SBATCH --partition=compute              # 단일 큐
+#SBATCH --qos=normal                     # Normal QoS
+#SBATCH --account=ddp_projects
+#SBATCH --nodes=10
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --constraint=a100-40gb
+#SBATCH --exclusive
+#SBATCH --time=1-00:00:00                # 1일
+#SBATCH --output=logs/ddp/%x_%j.out
+
+echo "Job: $SLURM_JOB_ID"
+echo "QoS: normal"
+echo "Priority: 1000"
+echo "Nodes: $SLURM_JOB_NUM_NODES"
+
+export NCCL_DEBUG=INFO
+
+declare -a CONTAINER_ARGS=(
+    --container-image=/fsx/containers/ddp.sqsh
+    --container-mounts=/fsx:/fsx
+)
+
+declare -a TORCHRUN_ARGS=(
+    --nproc_per_node=8
+    --nnodes=$SLURM_JOB_NUM_NODES
+    --rdzv_id=$SLURM_JOB_ID
+    --rdzv_backend=c10d
+    --rdzv_endpoint=$(scontrol show hostname $SLURM_NODELIST | head -n1)
+)
+
+# 80 GPUs (10 nodes × 8)
+srun -l "${CONTAINER_ARGS[@]}" \
+    torchrun "${TORCHRUN_ARGS[@]}" \
+    train_ddp.py \
+    --model gpt2-large \
+    --data-path /fsx/data/wikitext \
+    --output-dir /fsx/checkpoints/ddp \
+    --batch-size 32
+
+🎯 고급 QoS 기능
+1️⃣ 선점(Preemption) 설정
+# Critical QoS는 다른 모든 작업을 선점 가능
+sacctmgr modify qos critical set Preempt=high,normal,low,preemptible -i
+
+# 선점 시 체크포인트 저장 스크립트
+# /opt/slurm/etc/slurm_prolog.sh
+#!/bin/bash
+if [ "$SLURM_JOB_PREEMPT" == "1" ]; then
+    echo "Job being preempted - saving checkpoint..."
+    # 체크포인트 저장 로직
+fi
+
+2️⃣ Fair Share 설정
+# 계정별 Fair Share 가중치
+sacctmgr modify account megatron_projects set fairshare=50 -i
+sacctmgr modify account deepspeed_projects set fairshare=30 -i
+sacctmgr modify account ddp_projects set fairshare=20 -i
+
+# Fair Share 우선순위 계산 활성화
+# /opt/slurm/etc/slurm.conf
+PriorityType=priority/multifactor
+PriorityWeightAge=1000
+PriorityWeightFairshare=10000
+PriorityWeightJobSize=1000
+PriorityWeightPartition=1000
+PriorityWeightQOS=10000
+PriorityMaxAge=7-0
+
+3️⃣ 동적 리소스 제한
+# 시간대별 QoS 제한 조정 (예: 업무 시간 vs 야간)
+# scripts/adjust_qos_limits.sh
+
+#!/bin/bash
+HOUR=$(date +%H)
+
+if [ $HOUR -ge 9 ] && [ $HOUR -le 18 ]; then
+    # 업무 시간: 제한 완화
+    sacctmgr modify qos normal set MaxNodesPerJob=40 -i
+    sacctmgr modify qos low set MaxNodesPerJob=20 -i
+else
+    # 야간: 제한 강화 (더 많은 리소스 허용)
+    sacctmgr modify qos normal set MaxNodesPerJob=50 -i
+    sacctmgr modify qos low set MaxNodesPerJob=30 -i
+fi
+
+# Cron으로 자동 실행
+# 0 9,18 * * * /path/to/adjust_qos_limits.sh
+
+4️⃣ 버스팅(Bursting) 허용
+# 특정 QoS에 버스팅 허용 (일시적으로 제한 초과)
+sacctmgr modify qos high set \
+    GrpTRESMins=cpu=1000000 \
+    MaxTRESPerUser=cpu=5000 \
+    -i
+
+# 사용자가 일정 크레딧 내에서 제한 초과 가능
+
+📊 리소스 활용 최적화 시나리오
+시나리오 1: 모든 작업 동시 실행 (이상적)
+시간: 00:00
+상태: 
+├─ Megatron (Critical): 50 노드 사용 중
+├─ DeepSpeed (High):    30 노드 사용 중
+└─ DDP (Normal):        20 노드 사용 중
+
+총 사용: 100 노드 (100% 활용) ✅
+
+시나리오 2: Critical 작업 추가 도착
+시간: 02:00
+이벤트: 새로운 Critical 작업 제출 (20 노드 필요)
+
+Slurm 동작:
+1. Normal QoS 작업 10개 선점 (체크포인트 저장)
+2. Low QoS 작업 10개 선점
+3. 20 노드 확보
+4. Critical 작업 즉시 시작
+
+결과:
+├─ Megatron (Critical): 70 노드 (50 + 20)
+├─ DeepSpeed (High):    30 노드 (유지)
+└─ DDP (Normal):        0 노드 (선점됨, 대기 중)
+
+총 사용: 100 노드 (100% 활용) ✅
+
+시나리오 3: Critical 작업 완료 후
+시간: 06:00
+이벤트: Critical 작업 1개 완료 (50 노드 해제)
+
+Slurm 동작:
+1. 대기 중인 Normal 작업 재시작 (체크포인트에서)
+2. 남은 리소스로 Low 작업 시작
+
+결과:
+├─ Megatron (Critical): 20 노드
+├─ DeepSpeed (High):    30 노드
+├─ DDP (Normal):        30 노드 (재시작)
+└─ Experimental (Low):  20 노드 (새로 시작)
+
+총 사용: 100 노드 (100% 활용) ✅
+
+🔍 모니터링 및 분석
+1️⃣ 실시간 QoS 모니터링
+#!/bin/bash
+# scripts/monitor_qos.sh
+
+watch -n 5 '
+echo "=== Slurm QoS Status ==="
+echo ""
+
+echo "=== Queue Status ==="
+squeue -o "%.10i %.12j %.10u %.10a %.10q %.8T %.10M %.6D %R" --sort=-p,q
+
+echo ""
+echo "=== QoS Usage Summary ==="
+for qos in critical high normal low preemptible; do
+    running=$(squeue -q $qos -t RUNNING -h | wc -l)
+    pending=$(squeue -q $qos -t PENDING -h | wc -l)
+    nodes=$(squeue -q $qos -t RUNNING -h -o "%D" | awk "{sum+=\$1} END {print sum}")
+    echo "$qos: Running=$running, Pending=$pending, Nodes=$nodes"
+done
+
+echo ""
+echo "=== Fair Share Status ==="
+sshare -A
+
+echo ""
+echo "=== Resource Utilization ==="
+sinfo -o "%20P %5a %10l %6D %6t %10C"
+
+echo ""
+echo "=== Top Priority Jobs ==="
+sprio -o "%.10i %.10u %.10q %.10Y %.10F %.10J %.10P %.10Q" | head -n 10
+'
+
+2️⃣ 리소스 활용률 분석
+#!/bin/bash
+# scripts/analyze_utilization.sh
+
+# 지난 24시간 통계
+sacct -S $(date -d '1 day ago' +%Y-%m-%d) \
+      -o JobID,JobName,Account,QOS,AllocNodes,Elapsed,State \
+      --format=JobID,JobName,Account,QOS,AllocNodes,Elapsed,State
+
+# QoS별 리소스 사용 통계
+echo ""
+echo "=== QoS Resource Usage (Last 24h) ==="
+for qos in critical high normal low; do
+    echo "--- $qos ---"
+    sacct -S $(date -d '1 day ago' +%Y-%m-%d) \
+          -X -q $qos \
+          --format=AllocNodes,CPUTime,Elapsed \
+          | awk 'NR>2 {nodes+=$1; cputime+=$2} END {print "Total Nodes:", nodes, "Total CPU Hours:", cputime/3600}'
+done
+
+# 평균 대기 시간
+echo ""
+echo "=== Average Wait Time by QoS ==="
+for qos in critical high normal low; do
+    avg_wait=$(sacct -S $(date -d '1 day ago' +%Y-%m-%d) \
+                     -X -q $qos -s COMPLETED \
+                     --format=Submit,Start \
+                     | awk 'NR>2 {/* 대기 시간 계산 */}')
+    echo "$qos: $avg_wait"
+done
+
+3️⃣ CloudWatch 통합
+#!/usr/bin/env python3
+# scripts/cloudwatch_metrics.py
+
+import boto3
+import subprocess
+import time
+
+cloudwatch = boto3.client('cloudwatch', region_name='us-east-1')
+
+def get_slurm_metrics():
+    """Slurm 메트릭 수집"""
+    metrics = {}
+    
+    # QoS별 실행 중인 작업 수
+    for qos in ['critical', 'high', 'normal', 'low']:
+        result = subprocess.run(
+            ['squeue', '-q', qos, '-t', 'RUNNING', '-h'],
+            capture_output=True, text=True
+        )
+        metrics[f'{qos}_running'] = len(result.stdout.strip().split('\n'))
+    
+    # 전체 노드 사용률
+    result = subprocess.run(
+        ['sinfo', '-h', '-o', '%D %t'],
+        capture_output=True, text=True
+    )
+    total_nodes = 0
+    allocated_nodes = 0
+    for line in result.stdout.strip().split('\n'):
+        count, state = line.split()
+        total_nodes += int(count)
+        if state == 'alloc':
+            allocated_nodes += int(count)
+    
+    metrics['node_utilization'] = (allocated_nodes / total_nodes * 100) if total_nodes > 0 else 0
+    
+    return metrics
+
+def send_to_cloudwatch(metrics):
+    """CloudWatch에 메트릭 전송"""
+    metric_data = []
+    
+    for metric_name, value in metrics.items():
+        metric_data.append({
+            'MetricName': metric_name,
+            'Value': value,
+            'Unit': 'Count' if 'running' in metric_name else 'Percent',
+            'Timestamp': time.time()
+        })
+    
+    cloudwatch.put_metric_data(
+        Namespace='SlurmCluster',
+        MetricData=metric_data
+    )
+
+if __name__ == '__main__':
+    while True:
+        metrics = get_slurm_metrics()
+        send_to_cloudwatch(metrics)
+        print(f"Sent metrics: {metrics}")
+        time.sleep(60)  # 1분마다
+
+💰 비용 최적화 (단일 큐 + QoS)
+ODCR 100개 인스턴스 최적 활용
+# 실시간 리소스 재분배 스크립트
+#!/bin/bash
+# scripts/optimize_resources.sh
+
+# 현재 사용 중인 노드 수 확인
+CRITICAL_NODES=$(squeue -q critical -t RUNNING -h -o "%D" | awk '{sum+=$1} END {print sum}')
+HIGH_NODES=$(squeue -q high -t RUNNING -h -o "%D" | awk '{sum+=$1} END {print sum}')
+NORMAL_NODES=$(s
+
+Advanced
+Connected
