@@ -1,4 +1,4 @@
-
+```
 #!/bin/bash
 #
 # P5 Instance Performance Validation Script
@@ -146,3 +146,4 @@ EOF add_result "osu_benchmarks" "skip" "OSU benchmarks not found" return 0 fi # 
 # 11. EFA 통계 및 에러 점검
 #=============================================================================
 check_efa_stats() { log "=== EFA 통계 및 에러 점검 ===" for efa_dev in $(ls /sys/class/infiniband/ | grep efa); do log "EFA Device: ${efa_dev}" # Port counters PORT_DIR="/sys/class/infiniband/${efa_dev}/ports/1/counters" if [ -d "${PORT_DIR}" ]; then # RX/TX 패킷 RX_PACKETS=$(cat ${PORT_DIR}/port_rcv_packets 2>/dev/null || echo 0) TX_PACKETS=$(cat ${PORT_DIR}/port_xmit_packets 2>/dev/null || echo 0) log "  RX Packets: ${RX_PACKETS}" log "  TX Packets: ${TX_PACKETS}" # 에러 카운터 RX_ERRORS=$(cat ${PORT_DIR}/port_rcv_errors 2>/dev/null || echo 0) TX_ERRORS=$(cat ${PORT_DIR}/port_xmit_discards 2>/dev/null || echo 0) if [ ${RX_ERRORS} -gt 0 ] || [ ${TX_ERRORS} -gt 0 ]; then log_warning "  에러 발견 - RX Errors: ${RX_ERRORS}, TX Errors: ${TX_ERRORS}" else log_success "  에
+```
