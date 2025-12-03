@@ -387,7 +387,7 @@ aws s3 ls s3://training-data-jakarta/
       -  GPU 할당 확인 
    
 ```
-# 1. 테스트 작업 스크립트 생성
+# 1. 테스트 작업 스크립트 생성: 이 스크립트는 SLURM 작업 스케줄러에서 2개의 컴퓨팅 노드에 GPU를 할당받을 수 있는지 테스트
 cat > test_2nodes.sh <<'EOF'
 #!/bin/bash
 #SBATCH --job-name=test-2nodes    # 작업 이름
