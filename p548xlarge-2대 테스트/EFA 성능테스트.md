@@ -1,7 +1,8 @@
 
 ## https://catalog.workshops.aws/ml-on-aws-parallelcluster/en-US/06-observability/08-grafana-osu : 이 워크샵 기반으로 수행
-### 파티션(큐)이름만 변경
-ㅊ 'squeue'로 실행이 종료 후 확인
+### 파티션(큐)이름 변경 및 , 스크립트 변경 필요(hpc7g.16xlarge 용)
+
+'squeue'로 실행이 종료 후 확인
 
 ```
 -rw-rw-r-- 1 ubuntu ubuntu   1220 Dec  4 00:01 osu_bw.out
