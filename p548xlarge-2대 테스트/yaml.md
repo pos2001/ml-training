@@ -1,7 +1,7 @@
 
 ### https://catalog.workshops.aws/ml-on-aws-parallelcluster/en-US/03-cluster/02-setup-cluster => 기반으로 하면 문제 발생하여 아래 버전 사용
 
-### 이 스크립트를 이용하면 NCCL이 설치가 안됨
+### 이 스크립트를 이용하면 NCCL이 헤드노드와 컴퓨트노드에 설치가 안됨
 ```
 가능한 원인:
 
