@@ -1,7 +1,7 @@
 
 ### https://catalog.workshops.aws/ml-on-aws-parallelcluster/en-US/03-cluster/02-setup-cluster => 기반으로 하면 문제 발생하여 아래 버전 사용
 
-
+### https://raw.githubusercontent.com/aws-samples/aws-parallelcluster-post-install-scripts/main/nccl/postinstall.sh 이 스크립트가 GPU 체크가 없음
 
 ```
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
