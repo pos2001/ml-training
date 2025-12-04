@@ -1,24 +1,7 @@
 
 ### https://catalog.workshops.aws/ml-on-aws-parallelcluster/en-US/03-cluster/02-setup-cluster => 기반으로 하면 문제 발생하여 아래 버전 사용
 
-### 이 스크립트를 이용하면 NCCL이 헤드노드와 컴퓨트노드에 설치가 안됨
-```
-가능한 원인:
 
-1. 노드가 스크립트 실행 전에 생성됨
-
-    YAML에 스크립트 추가 전에 클러스터 생성
-    기존 노드는 새 설정 적용 안 됨
-
-2. CustomActions 실행 실패
-
-    네트워크 문제로 스크립트 다운로드 실패
-    조용히 실패 (에러 로그 없음)
-
-3. OnNodeConfigured 타이밍 문제
-
-    노드 설정 단계에서 스크립트 실행 누락
-```
 
 ```
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
