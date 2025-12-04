@@ -1,0 +1,591 @@
+# 클러스터 구성 후 컴퓨트 노드 스캔
+##
+```
+#!/bin/bash
+
+# /fsx에 스크립트 생성 (모든 노드에서 접근 가능)
+cat > /fsx/compute_node_full_check.sh << 'EOFSCRIPT'
+#!/bin/bash
+
+echo "=========================================="
+echo "컴퓨트 노드 모델 훈련 관련 패키지 완전 점검"
+echo "=========================================="
+echo "Hostname: $(hostname)"
+echo "Date: $(date)"
+echo ""
+
+# ============================================
+# 1. GPU 관련
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "1. GPU 및 NVIDIA 관련"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "1.1 GPU 하드웨어:"
+if lspci | grep -i nvidia &> /dev/null; then
+    echo "  ✅ NVIDIA GPU 하드웨어 존재"
+    lspci | grep -i nvidia
+else
+    echo "  ❌ NVIDIA GPU 하드웨어 없음"
+fi
+echo ""
+
+echo "1.2 NVIDIA 드라이버:"
+if lsmod | grep -q nvidia; then
+    echo "  ✅ NVIDIA 드라이버 모듈 로드됨"
+    lsmod | grep nvidia | head -5
+    echo ""
+    echo "  드라이버 버전:"
+    cat /proc/driver/nvidia/version 2>/dev/null | head -1 || echo "  확인 불가"
+else
+    echo "  ❌ NVIDIA 드라이버 모듈 없음"
+fi
+echo ""
+
+echo "1.3 nvidia-smi:"
+if command -v nvidia-smi &> /dev/null; then
+    if nvidia-smi &> /dev/null; then
+        echo "  ✅ nvidia-smi 작동함"
+        echo ""
+        nvidia-smi --query-gpu=index,name,driver_version,memory.total --format=csv
+    else
+        echo "  ❌ nvidia-smi 작동 안 함"
+    fi
+else
+    echo "  ❌ nvidia-smi 명령 없음"
+fi
+echo ""
+
+echo "1.4 GPU 개수 및 상태:"
+if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+    GPU_COUNT=$(nvidia-smi --query-gpu=count --format=csv,noheader | head -1)
+    echo "  GPU 개수: $GPU_COUNT"
+    echo ""
+    echo "  GPU 상세 정보:"
+    nvidia-smi --query-gpu=index,name,temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv
+else
+    echo "  GPU 정보 확인 불가"
+fi
+echo ""
+
+# ============================================
+# 2. CUDA
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "2. CUDA Toolkit"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "2.1 CUDA 디렉토리:"
+if [ -d /usr/local/cuda ]; then
+    echo "  ✅ 존재"
+    ls -la /usr/local/cuda
+    echo ""
+    echo "  설치된 CUDA 버전들:"
+    ls -d /usr/local/cuda-* 2>/dev/null
+else
+    echo "  ❌ 없음"
+fi
+echo ""
+
+echo "2.2 nvcc (CUDA 컴파일러):"
+if command -v nvcc &> /dev/null; then
+    echo "  ✅ PATH에서 실행 가능"
+    nvcc --version
+elif [ -f /usr/local/cuda/bin/nvcc ]; then
+    echo "  ⚠️  파일 존재하지만 PATH에 없음"
+    /usr/local/cuda/bin/nvcc --version 2>&1 | grep release
+else
+    echo "  ❌ nvcc 없음"
+fi
+echo ""
+
+echo "2.3 CUDA 라이브러리:"
+if [ -d /usr/local/cuda/lib64 ]; then
+    echo "  ✅ 라이브러리 디렉토리 존재"
+    echo "  주요 라이브러리:"
+    ls -lh /usr/local/cuda/lib64/libcudart.so* 2>/dev/null | head -3
+    ls -lh /usr/local/cuda/lib64/libcublas.so* 2>/dev/null | head -1
+else
+    echo "  ❌ 라이브러리 디렉토리 없음"
+fi
+echo ""
+
+echo "2.4 CUDA PATH 설정:"
+if echo $PATH | grep -q cuda; then
+    echo "  ✅ PATH에 CUDA 포함됨"
+    echo $PATH | tr ':' '\n' | grep cuda
+else
+    echo "  ❌ PATH에 CUDA 없음"
+fi
+echo ""
+
+# ============================================
+# 3. NCCL
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "3. NCCL"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "3.1 NCCL 라이브러리:"
+if [ -f /opt/nccl/build/lib/libnccl.so ]; then
+    echo "  ✅ 라이브러리 존재"
+    ls -lh /opt/nccl/build/lib/libnccl.so*
+else
+    echo "  ❌ 라이브러리 없음"
+fi
+echo ""
+
+echo "3.2 NCCL 의존성:"
+if [ -f /opt/nccl/build/lib/libnccl.so ]; then
+    echo "  CUDA 의존성:"
+    ldd /opt/nccl/build/lib/libnccl.so 2>/dev/null | grep -i cuda || echo "  ⚠️  CUDA 의존성 없음"
+fi
+echo ""
+
+# ============================================
+# 4. EFA
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "4. EFA"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "4.1 EFA 디바이스:"
+if ls /dev/infiniband/uverbs* &> /dev/null; then
+    EFA_DEV_COUNT=$(ls /dev/infiniband/uverbs* | wc -l)
+    echo "  ✅ $EFA_DEV_COUNT 개"
+else
+    echo "  ❌ 없음"
+fi
+echo ""
+
+echo "4.2 EFA 인터페이스:"
+EFA_COUNT=$(ip link show | grep -c "efa" || echo "0")
+if [ "$EFA_COUNT" -gt 0 ]; then
+    echo "  ✅ $EFA_COUNT 개"
+else
+    echo "  ❌ 없음"
+fi
+echo ""
+
+echo "4.3 EFA Provider:"
+if command -v fi_info &> /dev/null && fi_info -p efa &> /dev/null; then
+    echo "  ✅ 사용 가능"
+    fi_info -p efa 2>/dev/null | head -3
+else
+    echo "  ❌ 사용 불가"
+fi
+echo ""
+
+# ============================================
+# 5. AWS OFI NCCL
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "5. AWS OFI NCCL Plugin"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+if [ -f /opt/aws-ofi-nccl/lib/libnccl-net.so ]; then
+    echo "  ✅ 플러그인 존재"
+    ls -lh /opt/aws-ofi-nccl/lib/libnccl-net.so
+else
+    echo "  ❌ 플러그인 없음"
+fi
+echo ""
+
+# ============================================
+# 6. 환경 변수
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "6. 환경 변수"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "CUDA_HOME: ${CUDA_HOME:-'❌ 미설정'}"
+echo "PATH (CUDA): $(echo $PATH | grep -o cuda || echo '❌ 없음')"
+echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-'❌ 미설정'}"
+echo "FI_PROVIDER: ${FI_PROVIDER:-'❌ 미설정'}"
+echo "LD_PRELOAD: ${LD_PRELOAD:-'❌ 미설정'}"
+echo ""
+
+# ============================================
+# 7. Python & PyTorch
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "7. Python & PyTorch"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+if command -v python3 &> /dev/null; then
+    echo "Python: ✅ $(python3 --version)"
+    python3 -c "import torch; print(f'PyTorch: ✅ {torch.__version__}')" 2>/dev/null || echo "PyTorch: ❌ 없음"
+    python3 -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')" 2>/dev/null || echo "확인 불가"
+else
+    echo "Python: ❌ 없음"
+fi
+echo ""
+
+# ============================================
+# 요약
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "요약"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+if nvidia-smi &> /dev/null; then
+    GPU_COUNT=$(nvidia-smi --query-gpu=count --format=csv,noheader | head -1)
+    echo "✅ GPU: $GPU_COUNT 개"
+else
+    echo "❌ GPU: 없음"
+fi
+
+if command -v nvcc &> /dev/null; then
+    echo "✅ CUDA: PATH 설정됨"
+elif [ -f /usr/local/cuda/bin/nvcc ]; then
+    echo "⚠️  CUDA: 설치됨 (PATH 미설정)"
+else
+    echo "❌ CUDA: 없음"
+fi
+
+if [ -f /opt/nccl/build/lib/libnccl.so ]; then
+    echo "✅ NCCL: 설치됨"
+else
+    echo "❌ NCCL: 없음"
+fi
+
+if ls /dev/infiniband/uverbs* &> /dev/null; then
+    EFA_DEV_COUNT=$(ls /dev/infiniband/uverbs* | wc -l)
+    echo "✅ EFA: $EFA_DEV_COUNT devices"
+else
+    echo "❌ EFA: 없음"
+fi
+
+if [ -n "$CUDA_HOME" ] && [ -n "$LD_LIBRARY_PATH" ]; then
+    echo "✅ 환경 변수: 설정됨"
+else
+    echo "⚠️  환경 변수: 미설정"
+fi
+
+echo ""
+echo "=========================================="
+echo ""
+
+EOFSCRIPT
+
+chmod +x /fsx/compute_node_full_check.sh
+
+echo "=========================================="
+echo "컴퓨트 노드 2개 점검 시작"
+echo "=========================================="
+echo ""
+
+# /fsx에서 실행 (모든 노드가 접근 가능)
+srun -N 2 --ntasks-per-node=1 /fsx/compute_node_full_check.sh
+
+```
+
+
+
+### 점검 결과
+```
+==========================================
+컴퓨트 노드 2개 점검 시작
+==========================================
+
+==========================================
+컴퓨트 노드 모델 훈련 관련 패키지 완전 점검
+==========================================
+Hostname: compute-gpu-st-distributed-ml-2
+Date: Thu Dec  4 02:28:13 UTC 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. GPU 및 NVIDIA 관련
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1.1 GPU 하드웨어:
+==========================================
+컴퓨트 노드 모델 훈련 관련 패키지 완전 점검
+==========================================
+Hostname: compute-gpu-st-distributed-ml-1
+Date: Thu Dec  4 02:28:13 UTC 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. GPU 및 NVIDIA 관련
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1.1 GPU 하드웨어:
+  ✅ NVIDIA GPU 하드웨어 존재
+  ✅ NVIDIA GPU 하드웨어 존재
+53:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+64:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+75:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+86:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+97:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+a8:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+b9:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+ca:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+cf:00.0 Bridge: NVIDIA Corporation Device 22a3 (rev a1)
+d0:00.0 Bridge: NVIDIA Corporation Device 22a3 (rev a1)
+d1:00.0 Bridge: NVIDIA Corporation Device 22a3 (rev a1)
+d2:00.0 Bridge: NVIDIA Corporation Device 22a3 (rev a1)
+
+1.2 NVIDIA 드라이버:
+  ✅ NVIDIA 드라이버 모듈 로드됨
+53:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+64:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+75:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+86:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+97:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+a8:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+b9:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+ca:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+cf:00.0 Bridge: NVIDIA Corporation Device 22a3 (rev a1)
+d0:00.0 Bridge: NVIDIA Corporation Device 22a3 (rev a1)
+d1:00.0 Bridge: NVIDIA Corporation Device 22a3 (rev a1)
+d2:00.0 Bridge: NVIDIA Corporation Device 22a3 (rev a1)
+nvidia_uvm           5025792  0
+nvidia_drm            122880  0
+nvidia_modeset       1507328  1 nvidia_drm
+video                  77824  1 nvidia_modeset
+nvidia               8781824  36 nvidia_uvm,gdrdrv,nvidia_modeset
+
+  드라이버 버전:
+
+1.2 NVIDIA 드라이버:
+NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  550.90.07  Release Build  (dvs-builder@U16-I2-C05-15-3)  Fri May 31 09:44:37 UTC 2024
+
+1.3 nvidia-smi:
+  ✅ NVIDIA 드라이버 모듈 로드됨
+nvidia_uvm           5025792  0
+nvidia_drm            122880  0
+nvidia_modeset       1507328  1 nvidia_drm
+video                  77824  1 nvidia_modeset
+nvidia               8781824  36 nvidia_uvm,gdrdrv,nvidia_modeset
+
+  드라이버 버전:
+NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  550.90.07  Release Build  (dvs-builder@U16-I2-C05-15-3)  Fri May 31 09:44:37 UTC 2024
+
+1.3 nvidia-smi:
+  ✅ nvidia-smi 작동함
+
+  ✅ nvidia-smi 작동함
+
+index, name, driver_version, memory.total [MiB]
+0, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+1, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+2, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+3, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+4, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+5, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+6, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+7, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+index, name, driver_version, memory.total [MiB]
+0, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+1, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+2, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+3, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+4, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+5, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+6, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+7, NVIDIA H100 80GB HBM3, 550.90.07, 81559 MiB
+
+1.4 GPU 개수 및 상태:
+
+1.4 GPU 개수 및 상태:
+  GPU 개수: 8
+
+  GPU 상세 정보:
+  GPU 개수: 8
+
+  GPU 상세 정보:
+index, name, temperature.gpu, utilization.gpu [%], memory.used [MiB], memory.total [MiB]
+0, NVIDIA H100 80GB HBM3, 33, 0 %, 1 MiB, 81559 MiB
+index, name, temperature.gpu, utilization.gpu [%], memory.used [MiB], memory.total [MiB]
+1, NVIDIA H100 80GB HBM3, 34, 0 %, 1 MiB, 81559 MiB
+0, NVIDIA H100 80GB HBM3, 33, 0 %, 1 MiB, 81559 MiB
+2, NVIDIA H100 80GB HBM3, 33, 0 %, 1 MiB, 81559 MiB
+1, NVIDIA H100 80GB HBM3, 33, 0 %, 1 MiB, 81559 MiB
+3, NVIDIA H100 80GB HBM3, 36, 0 %, 1 MiB, 81559 MiB
+2, NVIDIA H100 80GB HBM3, 33, 0 %, 1 MiB, 81559 MiB
+4, NVIDIA H100 80GB HBM3, 35, 0 %, 1 MiB, 81559 MiB
+3, NVIDIA H100 80GB HBM3, 34, 0 %, 1 MiB, 81559 MiB
+5, NVIDIA H100 80GB HBM3, 33, 0 %, 1 MiB, 81559 MiB
+4, NVIDIA H100 80GB HBM3, 35, 0 %, 1 MiB, 81559 MiB
+6, NVIDIA H100 80GB HBM3, 34, 0 %, 1 MiB, 81559 MiB
+5, NVIDIA H100 80GB HBM3, 34, 0 %, 1 MiB, 81559 MiB
+7, NVIDIA H100 80GB HBM3, 36, 0 %, 1 MiB, 81559 MiB
+6, NVIDIA H100 80GB HBM3, 33, 0 %, 1 MiB, 81559 MiB
+7, NVIDIA H100 80GB HBM3, 33, 0 %, 1 MiB, 81559 MiB
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. CUDA Toolkit
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2.1 CUDA 디렉토리:
+  ✅ 존재
+lrwxrwxrwx 1 root root 21 Oct 18  2024 /usr/local/cuda -> /usr/local/cuda-12.4/
+
+  설치된 CUDA 버전들:
+/usr/local/cuda-12.4
+/usr/local/cuda-samples-12.4
+
+2.2 nvcc (CUDA 컴파일러):
+  ⚠️  파일 존재하지만 PATH에 없음
+Cuda compilation tools, release 12.4, V12.4.131
+
+2.3 CUDA 라이브러리:
+  ✅ 라이브러리 디렉토리 존재
+  주요 라이브러리:
+lrwxrwxrwx 1 root root   15 Oct 18  2024 /usr/local/cuda/lib64/libcudart.so -> libcudart.so.12
+lrwxrwxrwx 1 root root   21 Oct 18  2024 /usr/local/cuda/lib64/libcudart.so.12 -> libcudart.so.12.4.127
+-rwxr-xr-x 1 root root 692K Oct 18  2024 /usr/local/cuda/lib64/libcudart.so.12.4.127
+lrwxrwxrwx 1 root root   15 Oct 18  2024 /usr/local/cuda/lib64/libcublas.so -> libcublas.so.12
+
+
+2.4 CUDA PATH 설정:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. CUDA Toolkit
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2.1 CUDA 디렉토리:
+  ✅ 존재
+  ❌ PATH에 CUDA 없음
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. NCCL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.1 NCCL 라이브러리:
+  ✅ 라이브러리 존재
+lrwxrwxrwx 1 root root 21 Oct 18  2024 /usr/local/cuda -> /usr/local/cuda-12.4/
+
+  설치된 CUDA 버전들:
+lrwxrwxrwx 1 root root   12 Dec  3 14:55 /opt/nccl/build/lib/libnccl.so -> libnccl.so.2
+lrwxrwxrwx 1 root root   17 Dec  3 14:55 /opt/nccl/build/lib/libnccl.so.2 -> libnccl.so.2.23.4
+-rwxr-xr-x 1 root root 111M Dec  3 14:55 /opt/nccl/build/lib/libnccl.so.2.23.4
+
+3.2 NCCL 의존성:
+  CUDA 의존성:
+/usr/local/cuda-12.4
+/usr/local/cuda-samples-12.4
+
+2.2 nvcc (CUDA 컴파일러):
+  ⚠️  파일 존재하지만 PATH에 없음
+  ⚠️  CUDA 의존성 없음
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. EFA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4.1 EFA 디바이스:
+Cuda compilation tools, release 12.4, V12.4.131
+
+2.3 CUDA 라이브러리:
+  ✅ 라이브러리 디렉토리 존재
+  주요 라이브러리:
+lrwxrwxrwx 1 root root   15 Oct 18  2024 /usr/local/cuda/lib64/libcudart.so -> libcudart.so.12
+lrwxrwxrwx 1 root root   21 Oct 18  2024 /usr/local/cuda/lib64/libcudart.so.12 -> libcudart.so.12.4.127
+-rwxr-xr-x 1 root root 692K Oct 18  2024 /usr/local/cuda/lib64/libcudart.so.12.4.127
+  ✅ 32 개
+
+4.2 EFA 인터페이스:
+lrwxrwxrwx 1 root root   15 Oct 18  2024 /usr/local/cuda/lib64/libcublas.so -> libcublas.so.12
+
+2.4 CUDA PATH 설정:
+  ❌ PATH에 CUDA 없음
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. NCCL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.1 NCCL 라이브러리:
+  ✅ 라이브러리 존재
+  ✅ 34 개
+
+4.3 EFA Provider:
+lrwxrwxrwx 1 root root   12 Dec  3 14:55 /opt/nccl/build/lib/libnccl.so -> libnccl.so.2
+lrwxrwxrwx 1 root root   17 Dec  3 14:55 /opt/nccl/build/lib/libnccl.so.2 -> libnccl.so.2.23.4
+-rwxr-xr-x 1 root root 111M Dec  3 14:55 /opt/nccl/build/lib/libnccl.so.2.23.4
+
+3.2 NCCL 의존성:
+  CUDA 의존성:
+  ⚠️  CUDA 의존성 없음
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. EFA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4.1 EFA 디바이스:
+  ✅ 32 개
+
+4.2 EFA 인터페이스:
+  ✅ 34 개
+
+4.3 EFA Provider:
+  ✅ 사용 가능
+  ✅ 사용 가능
+provider: efa
+    fabric: efa
+    domain: rdmap79s0-rdm
+provider: efa
+    fabric: efa
+    domain: rdmap79s0-rdm
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. AWS OFI NCCL Plugin
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✅ 플러그인 존재
+-rwxr-xr-x 1 root root 233K Dec  3 14:57 /opt/aws-ofi-nccl/lib/libnccl-net.so
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. 환경 변수
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CUDA_HOME: '❌ 미설정'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. AWS OFI NCCL Plugin
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✅ 플러그인 존재
+PATH (CUDA): ❌ 없음
+LD_LIBRARY_PATH: '❌ 미설정'
+FI_PROVIDER: '❌ 미설정'
+LD_PRELOAD: '❌ 미설정'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. Python & PyTorch
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+-rwxr-xr-x 1 root root 233K Dec  3 14:57 /opt/aws-ofi-nccl/lib/libnccl-net.so
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. 환경 변수
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CUDA_HOME: '❌ 미설정'
+Python: ✅ Python 3.10.12
+PATH (CUDA): ❌ 없음
+LD_LIBRARY_PATH: '❌ 미설정'
+FI_PROVIDER: '❌ 미설정'
+LD_PRELOAD: '❌ 미설정'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. Python & PyTorch
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Python: ✅ Python 3.10.12
+PyTorch: ❌ 없음
+PyTorch: ❌ 없음
+확인 불가
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+요약
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+확인 불가
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+요약
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ GPU: 8 개
+⚠️  CUDA: 설치됨 (PATH 미설정)
+✅ NCCL: 설치됨
+✅ EFA: 32 devices
+⚠️  환경 변수: 미설정
+
+==========================================
+
+✅ GPU: 8 개
+⚠️  CUDA: 설치됨 (PATH 미설정)
+✅ NCCL: 설치됨
+✅ EFA: 32 devices
+⚠️  환경 변수: 미설정
+
+==========================================
+
+ubuntu@ip-10-0-108-46:~$
+
+```
