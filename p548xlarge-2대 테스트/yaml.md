@@ -2,6 +2,8 @@
 ### https://catalog.workshops.aws/ml-on-aws-parallelcluster/en-US/03-cluster/02-setup-cluster => 기반으로 하면 문제 발생하여 아래 버전 사용
 
 ### https://raw.githubusercontent.com/aws-samples/aws-parallelcluster-post-install-scripts/main/nccl/postinstall.sh 이 스크립트가 GPU 체크가 없음
+FSx for Lustre가 마운트가 안된다는 문제 존재
+인공지능 이용하여 lustre 클라이언트를 헤드노드 및 컴퓨트 노드에 추가
 
 논리적으로는 GPU 없으면 NCCL을 설치하지 말아야 하지만, AWS는 모든 노드에 CUDA를 설치하고 스크립트는 GPU 체크를 하지 않아서 헤드노드에도 NCCL이 설치되었습니다
 ```
