@@ -3,6 +3,7 @@
 
 ### https://raw.githubusercontent.com/aws-samples/aws-parallelcluster-post-install-scripts/main/nccl/postinstall.sh 이 스크립트가 GPU 체크가 없음
 
+논리적으로는 GPU 없으면 NCCL을 설치하지 말아야 하지만, AWS는 모든 노드에 CUDA를 설치하고 스크립트는 GPU 체크를 하지 않아서 헤드노드에도 NCCL이 설치되었습니다
 ```
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
