@@ -1,4 +1,23 @@
-##헤드 노드 점검
+
+## 헤드 노드 정상 작동
+```
+역할: 작업 스케줄링 및 관리
+상태: ✅ 모든 기능 정상
+
+필수 기능:
+✅ Slurm 스케줄러: 작동
+✅ 작업 제출 (sbatch, srun): 가능
+✅ 노드 관리: 정상
+✅ 파일시스템 접근 (/fsx, /home): 정상
+✅ OpenMPI: 설치됨
+✅ Docker: 설치됨
+
+불필요하지만 있는 것:
+⚠️ CUDA, NCCL, EFA 등 (무해, 그냥 디스크만 차지)
+```
+
+
+## 헤드 노드 점검
 ```
 #!/bin/bash
 
@@ -714,4 +733,41 @@ OpenMPI: ✅ 설치됨
 점검 완료
 ==========================================
 ubuntu@ip-10-0-108-46:~$
+```
+
+### 헤드노드 점검 결과를 주요 항목별로 정리해드리겠습니다:
+```
+GPU/NVIDIA 관련 ✅
+GPU 하드웨어 없음 (헤드노드는 정상)
+NVIDIA 드라이버 없음 (헤드노드는 정상)
+CUDA Toolkit ⚠️
+CUDA 12.4 설치됨
+nvcc 컴파일러 존재
+단, PATH에 CUDA 경로가 없음 (설정 필요)
+NCCL ✅
+버전 2.23.4+cuda12.4 설치됨
+라이브러리 정상 설치
+EFA (Elastic Fabric Adapter) ✅
+EFA 소프트웨어 정상 설치
+EFA 드라이버 로드됨
+EFA 디바이스 없음 (헤드노드는 정상)
+Libfabric ✅
+버전 1.22.0 설치됨
+정상 동작 확인
+AWS OFI NCCL Plugin ✅
+플러그인 정상 설치
+의존성 정상
+MPI ✅
+OpenMPI 4.1.6 설치됨
+mpirun 정상 동작
+환경변수 설정 ⚠️
+PATH: OpenMPI, EFA 경로만 포함
+LD_LIBRARY_PATH 설정 안됨
+NCCL, Libfabric 환경변수 없음
+Python/ML ⚠️
+Python 3.10.12 설치됨
+PyTorch 설치 안됨
+기타 ✅
+Docker 설치됨 (버전 29.1.2)
+Slurm 설치됨 (버전 23.11.10)
 ```
