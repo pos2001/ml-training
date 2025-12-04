@@ -1,149 +1,717 @@
-
+##헤드 노드 점검
 ```
 #!/bin/bash
-# 파일명: full_cluster_check.sh
 
 echo "=========================================="
-echo "ParallelCluster 완전 진단"
+echo "헤드노드 모델 훈련 관련 패키지 완전 점검"
 echo "=========================================="
-echo ""
-
-# 헤드노드 체크
-echo "===== HEAD NODE ====="
 echo "Hostname: $(hostname)"
-echo "Instance Type: m5.8xlarge (예상)"
-echo ""
-echo "설치된 컴포넌트:"
-echo "  Docker: $(docker --version 2>/dev/null || echo 'Not found')"
-echo "  NCCL: $(ls /opt/nccl/build/lib/libnccl.so 2>/dev/null && echo 'Installed' || echo 'Not found')"
-echo "  AWS OFI NCCL: $(ls /opt/aws-ofi-nccl/lib/libnccl-net.so 2>/dev/null && echo 'Installed' || echo 'Not found')"
-echo "  GPU: $(nvidia-smi 2>/dev/null && echo 'Present' || echo 'Not present (정상)')"
-echo "  EFA: $(ls /dev/infiniband/uverbs* 2>/dev/null | wc -l) devices (0 = 정상)"
+echo "Date: $(date)"
 echo ""
 
-# 컴퓨트 노드 체크
-echo "===== COMPUTE NODES ====="
-srun -N 2 --ntasks-per-node=1 bash << 'EOFCOMPUTE'
-source /fsx/setup_gpu_env.sh 2>/dev/null || true
+# ============================================
+# 1. GPU 관련
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "1. GPU 및 NVIDIA 관련"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-echo "--- Node: $(hostname) ---"
-echo "Instance Type: p5.48xlarge (예상)"
+echo "1.1 GPU 하드웨어:"
+if lspci | grep -i nvidia &> /dev/null; then
+    echo "  ✅ NVIDIA GPU 하드웨어 존재"
+    lspci | grep -i nvidia
+else
+    echo "  ❌ NVIDIA GPU 하드웨어 없음 (정상)"
+fi
 echo ""
-echo "하드웨어:"
-echo "  GPU: $(nvidia-smi --query-gpu=count --format=csv,noheader 2>/dev/null || echo '0') x $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
-echo "  EFA Devices: $(ls /dev/infiniband/uverbs* 2>/dev/null | wc -l)"
-echo "  EFA Interfaces: $(ip link show | grep -c efa)"
-echo ""
-echo "소프트웨어:"
-echo "  Docker: $(docker --version 2>/dev/null | cut -d' ' -f3 || echo 'Not found')"
-echo "  CUDA: $(nvcc --version 2>/dev/null | grep release | awk '{print $5}' | tr -d ',' || echo 'Not in PATH')"
-echo "  NCCL: $(ls /opt/nccl/build/lib/libnccl.so.* 2>/dev/null | head -1 | xargs basename)"
-echo "  AWS OFI NCCL: $(ls /opt/aws-ofi-nccl/lib/libnccl-net.so 2>/dev/null && echo 'Present' || echo 'Not found')"
-echo "  Libfabric: $(fi_info --version 2>/dev/null | head -1)"
-echo ""
-echo "환경 변수:"
-echo "  CUDA_HOME: ${CUDA_HOME:-'Not set'}"
-echo "  FI_PROVIDER: ${FI_PROVIDER:-'Not set'}"
-echo "  LD_PRELOAD: ${LD_PRELOAD:-'Not set'}"
-echo ""
-echo "EFA Provider 테스트:"
-fi_info -p efa 2>/dev/null | head -3 || echo "  ERROR: EFA provider not available"
-echo ""
-EOFCOMPUTE
 
+echo "1.2 NVIDIA 드라이버:"
+if lsmod | grep -q nvidia; then
+    echo "  ✅ NVIDIA 드라이버 모듈 로드됨"
+    lsmod | grep nvidia | head -5
+else
+    echo "  ❌ NVIDIA 드라이버 모듈 없음"
+fi
+echo ""
+
+echo "1.3 nvidia-smi:"
+if command -v nvidia-smi &> /dev/null; then
+    echo "  ⚠️  명령 존재 (하지만 작동 여부는 별개)"
+    nvidia-smi &> /dev/null && echo "  ✅ 작동함" || echo "  ❌ 작동 안 함 (GPU 없음)"
+else
+    echo "  ❌ 명령 없음"
+fi
+echo ""
+
+# ============================================
+# 2. CUDA
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "2. CUDA Toolkit"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "2.1 CUDA 디렉토리:"
+if [ -d /usr/local/cuda ]; then
+    echo "  ✅ 존재"
+    ls -la /usr/local/cuda
+    echo ""
+    echo "  설치된 CUDA 버전들:"
+    ls -d /usr/local/cuda-* 2>/dev/null || echo "  없음"
+else
+    echo "  ❌ 없음"
+fi
+echo ""
+
+echo "2.2 nvcc (CUDA 컴파일러):"
+if [ -f /usr/local/cuda/bin/nvcc ]; then
+    echo "  ✅ 파일 존재"
+    /usr/local/cuda/bin/nvcc --version 2>&1 | grep release || echo "  실행 실패"
+else
+    echo "  ❌ 파일 없음"
+    # 다른 위치 확인
+    find /usr/local/cuda* -name nvcc 2>/dev/null | head -3 || echo "  어디에도 없음"
+fi
+echo ""
+
+echo "2.3 CUDA 라이브러리:"
+if [ -d /usr/local/cuda/lib64 ]; then
+    echo "  ✅ 라이브러리 디렉토리 존재"
+    ls /usr/local/cuda/lib64/libcudart.so* 2>/dev/null | head -3 || echo "  libcudart 없음"
+else
+    echo "  ❌ 라이브러리 디렉토리 없음"
+fi
+echo ""
+
+echo "2.4 CUDA PATH 설정:"
+if echo $PATH | grep -q cuda; then
+    echo "  ✅ PATH에 CUDA 포함됨"
+    echo "  $PATH" | tr ':' '\n' | grep cuda
+else
+    echo "  ❌ PATH에 CUDA 없음"
+fi
+echo ""
+
+# ============================================
+# 3. NCCL
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "3. NCCL (NVIDIA Collective Communications Library)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "3.1 NCCL 소스:"
+if [ -d /opt/nccl ]; then
+    echo "  ✅ 소스 디렉토리 존재"
+    ls -la /opt/nccl/ | head -5
+else
+    echo "  ❌ 소스 디렉토리 없음"
+fi
+echo ""
+
+echo "3.2 NCCL 라이브러리:"
+if [ -f /opt/nccl/build/lib/libnccl.so ]; then
+    echo "  ✅ 라이브러리 존재"
+    ls -lh /opt/nccl/build/lib/libnccl.so*
+    echo ""
+    echo "  NCCL 버전:"
+    strings /opt/nccl/build/lib/libnccl.so.2.23.4 2>/dev/null | grep "NCCL version" | head -1 || echo "  확인 불가"
+else
+    echo "  ❌ 라이브러리 없음"
+fi
+echo ""
+
+echo "3.3 NCCL 의존성:"
+if [ -f /opt/nccl/build/lib/libnccl.so ]; then
+    echo "  라이브러리 의존성:"
+    ldd /opt/nccl/build/lib/libnccl.so 2>/dev/null | head -10
+    echo ""
+    echo "  CUDA 의존성 확인:"
+    ldd /opt/nccl/build/lib/libnccl.so 2>/dev/null | grep -i cuda || echo "  ❌ CUDA 의존성 없음"
+else
+    echo "  라이브러리 없어서 확인 불가"
+fi
+echo ""
+
+# ============================================
+# 4. EFA (Elastic Fabric Adapter)
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "4. EFA (Elastic Fabric Adapter)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "4.1 EFA 디바이스:"
+if ls /dev/infiniband/uverbs* &> /dev/null; then
+    echo "  ✅ EFA 디바이스 존재"
+    ls -la /dev/infiniband/uverbs*
+else
+    echo "  ❌ EFA 디바이스 없음 (헤드노드는 정상)"
+fi
+echo ""
+
+echo "4.2 EFA 네트워크 인터페이스:"
+if ip link show | grep -q efa; then
+    echo "  ✅ EFA 인터페이스 존재"
+    ip link show | grep efa
+else
+    echo "  ❌ EFA 인터페이스 없음 (헤드노드는 정상)"
+fi
+echo ""
+
+echo "4.3 EFA 드라이버:"
+if lsmod | grep -q efa; then
+    echo "  ✅ EFA 드라이버 모듈 로드됨"
+    lsmod | grep efa
+else
+    echo "  ❌ EFA 드라이버 모듈 없음 (헤드노드는 정상)"
+fi
+echo ""
+
+echo "4.4 EFA 패키지:"
+dpkg -l | grep efa 2>/dev/null | grep -E "^ii" | awk '{print "  ✅ " $2 " " $3}' || echo "  패키지 정보 없음"
+echo ""
+
+echo "4.5 EFA 설치 디렉토리:"
+if [ -d /opt/amazon/efa ]; then
+    echo "  ✅ EFA 디렉토리 존재"
+    ls -la /opt/amazon/efa/
+else
+    echo "  ❌ EFA 디렉토리 없음"
+fi
+echo ""
+
+# ============================================
+# 5. Libfabric
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "5. Libfabric (OpenFabrics Interface)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "5.1 Libfabric 라이브러리:"
+if [ -f /opt/amazon/efa/lib/libfabric.so ]; then
+    echo "  ✅ 라이브러리 존재"
+    ls -lh /opt/amazon/efa/lib/libfabric.so*
+else
+    echo "  ❌ 라이브러리 없음"
+    # 다른 위치 확인
+    find /usr /opt -name "libfabric.so*" 2>/dev/null | head -3
+fi
+echo ""
+
+echo "5.2 fi_info (Libfabric 정보 도구):"
+if command -v fi_info &> /dev/null; then
+    echo "  ✅ 명령 존재"
+    fi_info --version 2>&1 | head -3
+else
+    echo "  ❌ 명령 없음"
+fi
+echo ""
+
+echo "5.3 Libfabric Providers:"
+if command -v fi_info &> /dev/null; then
+    echo "  사용 가능한 Providers:"
+    fi_info -l 2>/dev/null || echo "  확인 실패"
+else
+    echo "  fi_info 없어서 확인 불가"
+fi
+echo ""
+
+echo "5.4 EFA Provider 테스트:"
+if command -v fi_info &> /dev/null; then
+    if fi_info -p efa &> /dev/null; then
+        echo "  ✅ EFA provider 사용 가능"
+        fi_info -p efa 2>/dev/null | head -5
+    else
+        echo "  ⚠️  EFA provider 사용 불가 (EFA 디바이스 없음)"
+    fi
+else
+    echo "  fi_info 없어서 확인 불가"
+fi
+echo ""
+
+# ============================================
+# 6. AWS OFI NCCL Plugin
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "6. AWS OFI NCCL Plugin"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "6.1 플러그인 라이브러리:"
+if [ -f /opt/aws-ofi-nccl/lib/libnccl-net.so ]; then
+    echo "  ✅ 플러그인 존재"
+    ls -lh /opt/aws-ofi-nccl/lib/libnccl-net.so*
+else
+    echo "  ❌ 플러그인 없음"
+fi
+echo ""
+
+echo "6.2 플러그인 의존성:"
+if [ -f /opt/aws-ofi-nccl/lib/libnccl-net.so ]; then
+    echo "  라이브러리 의존성:"
+    ldd /opt/aws-ofi-nccl/lib/libnccl-net.so 2>/dev/null | grep -E "(libfabric|libnccl|libcuda)" || echo "  주요 의존성 확인 안 됨"
+else
+    echo "  플러그인 없어서 확인 불가"
+fi
+echo ""
+
+echo "6.3 AWS OFI NCCL 소스:"
+if [ -d /opt/aws-ofi-nccl ]; then
+    echo "  ✅ 소스 디렉토리 존재"
+    ls -la /opt/aws-ofi-nccl/ | head -5
+else
+    echo "  ❌ 소스 디렉토리 없음"
+fi
+echo ""
+
+# ============================================
+# 7. MPI
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "7. MPI (Message Passing Interface)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "7.1 OpenMPI:"
+if [ -d /opt/amazon/openmpi ]; then
+    echo "  ✅ OpenMPI 디렉토리 존재"
+    ls -la /opt/amazon/openmpi/
+else
+    echo "  ❌ OpenMPI 디렉토리 없음"
+fi
+echo ""
+
+echo "7.2 mpirun:"
+if command -v mpirun &> /dev/null; then
+    echo "  ✅ mpirun 명령 존재"
+    mpirun --version 2>&1 | head -3
+else
+    echo "  ❌ mpirun 명령 없음"
+fi
+echo ""
+
+# ============================================
+# 8. 환경 변수
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "8. 환경 변수"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "8.1 PATH:"
+echo "$PATH" | tr ':' '\n' | grep -E "(cuda|efa|mpi|nccl)" || echo "  관련 경로 없음"
+echo ""
+
+echo "8.2 LD_LIBRARY_PATH:"
+if [ -n "$LD_LIBRARY_PATH" ]; then
+    echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -E "(cuda|efa|mpi|nccl)" || echo "  관련 경로 없음"
+else
+    echo "  ❌ 설정 안 됨"
+fi
+echo ""
+
+echo "8.3 NCCL 관련 환경 변수:"
+env | grep -i nccl || echo "  없음"
+echo ""
+
+echo "8.4 Libfabric 관련 환경 변수:"
+env | grep -i "^FI_" || echo "  없음"
+echo ""
+
+# ============================================
+# 9. Python 및 ML 프레임워크
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "9. Python 및 ML 프레임워크"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "9.1 Python:"
+if command -v python3 &> /dev/null; then
+    echo "  ✅ Python 존재"
+    python3 --version
+else
+    echo "  ❌ Python 없음"
+fi
+echo ""
+
+echo "9.2 PyTorch:"
+python3 -c "import torch; print(f'  ✅ PyTorch {torch.__version__}')" 2>/dev/null || echo "  ❌ PyTorch 없음"
+echo ""
+
+echo "9.3 PyTorch CUDA:"
+python3 -c "import torch; print(f'  CUDA available: {torch.cuda.is_available()}')" 2>/dev/null || echo "  확인 불가"
+echo ""
+
+echo "9.4 PyTorch NCCL:"
+python3 -c "import torch; print(f'  NCCL available: {torch.cuda.nccl.is_available() if torch.cuda.is_available() else False}')" 2>/dev/null || echo "  확인 불가"
+echo ""
+
+# ============================================
+# 10. 기타
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "10. 기타"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "10.1 Docker:"
+if command -v docker &> /dev/null; then
+    echo "  ✅ Docker 존재"
+    docker --version
+else
+    echo "  ❌ Docker 없음"
+fi
+echo ""
+
+echo "10.2 Slurm:"
+if command -v srun &> /dev/null; then
+    echo "  ✅ Slurm 명령 존재"
+    srun --version 2>&1 | head -1
+else
+    echo "  ❌ Slurm 명령 없음"
+fi
+echo ""
+
+# ============================================
+# 요약
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "요약: 헤드노드 설치 상태"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+summary=""
+
+# GPU
+if lspci | grep -qi nvidia; then
+    summary="${summary}GPU 하드웨어: ✅ 있음 (비정상)\n"
+else
+    summary="${summary}GPU 하드웨어: ❌ 없음 (정상)\n"
+fi
+
+# CUDA
+if [ -d /usr/local/cuda ] && [ -f /usr/local/cuda/bin/nvcc ]; then
+    summary="${summary}CUDA Toolkit: ✅ 설치됨\n"
+elif [ -d /usr/local/cuda ]; then
+    summary="${summary}CUDA Toolkit: ⚠️  부분 설치 (nvcc 없음)\n"
+else
+    summary="${summary}CUDA Toolkit: ❌ 없음\n"
+fi
+
+# NCCL
+if [ -f /opt/nccl/build/lib/libnccl.so ]; then
+    summary="${summary}NCCL: ✅ 설치됨\n"
+else
+    summary="${summary}NCCL: ❌ 없음\n"
+fi
+
+# EFA
+if [ -d /opt/amazon/efa ]; then
+    summary="${summary}EFA 소프트웨어: ✅ 설치됨\n"
+else
+    summary="${summary}EFA 소프트웨어: ❌ 없음\n"
+fi
+
+if ls /dev/infiniband/uverbs* &> /dev/null; then
+    summary="${summary}EFA 디바이스: ✅ 있음 (비정상)\n"
+else
+    summary="${summary}EFA 디바이스: ❌ 없음 (정상)\n"
+fi
+
+# Libfabric
+if command -v fi_info &> /dev/null; then
+    summary="${summary}Libfabric: ✅ 설치됨\n"
+else
+    summary="${summary}Libfabric: ❌ 없음\n"
+fi
+
+# AWS OFI NCCL
+if [ -f /opt/aws-ofi-nccl/lib/libnccl-net.so ]; then
+    summary="${summary}AWS OFI NCCL: ✅ 설치됨\n"
+else
+    summary="${summary}AWS OFI NCCL: ❌ 없음\n"
+fi
+
+# MPI
+if command -v mpirun &> /dev/null; then
+    summary="${summary}OpenMPI: ✅ 설치됨\n"
+else
+    summary="${summary}OpenMPI: ❌ 없음\n"
+fi
+
+echo -e "$summary"
+
+echo ""
 echo "=========================================="
-echo "진단 완료"
+echo "점검 완료"
 echo "=========================================="
+
 ```
 ### 진단결과
 ```
 ==========================================
-ParallelCluster 완전 진단
+헤드노드 모델 훈련 관련 패키지 완전 점검
 ==========================================
-
-===== HEAD NODE =====
 Hostname: ip-10-0-108-46
-Instance Type: m5.8xlarge (예상)
+Date: Thu Dec  4 02:16:10 UTC 2025
 
-설치된 컴포넌트:
-  Docker: Docker version 29.1.2, build 890dcca
-  NCCL: /opt/nccl/build/lib/libnccl.so
-Installed
-  AWS OFI NCCL: /opt/aws-ofi-nccl/lib/libnccl-net.so
-Installed
-  GPU: NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver. Make sure that the latest NVIDIA driver is installed and running.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. GPU 및 NVIDIA 관련
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1.1 GPU 하드웨어:
+  ❌ NVIDIA GPU 하드웨어 없음 (정상)
 
-Not present (정상)
-  EFA: 0 devices (0 = 정상)
+1.2 NVIDIA 드라이버:
+  ❌ NVIDIA 드라이버 모듈 없음
 
-===== COMPUTE NODES =====
---- Node: compute-gpu-st-distributed-ml-2 ---
---- Node: compute-gpu-st-distributed-ml-1 ---
-Instance Type: p5.48xlarge (예상)
+1.3 nvidia-smi:
+  ⚠️  명령 존재 (하지만 작동 여부는 별개)
+  ❌ 작동 안 함 (GPU 없음)
 
-하드웨어:
-Instance Type: p5.48xlarge (예상)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. CUDA Toolkit
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2.1 CUDA 디렉토리:
+  ✅ 존재
+lrwxrwxrwx 1 root root 21 Oct 18  2024 /usr/local/cuda -> /usr/local/cuda-12.4/
 
-하드웨어:
-  GPU: 8
-8
-8
-8
-8
-8
-8
-8 x NVIDIA H100 80GB HBM3
-  GPU: 8
-8
-8
-8
-8
-8
-8
-8 x NVIDIA H100 80GB HBM3
-  EFA Devices: 32
-  EFA Devices: 32
-  EFA Interfaces: 34
+  설치된 CUDA 버전들:
+/usr/local/cuda-12.4  /usr/local/cuda-samples-12.4
 
-소프트웨어:
-  EFA Interfaces: 34
+2.2 nvcc (CUDA 컴파일러):
+  ✅ 파일 존재
+Cuda compilation tools, release 12.4, V12.4.131
 
-소프트웨어:
-  Docker: 29.1.2,
-  CUDA:
-  NCCL: libnccl.so.2
-  AWS OFI NCCL: /opt/aws-ofi-nccl/lib/libnccl-net.so
-Present
-  Libfabric: fi_info: 1.22.0amzn1.0
+2.3 CUDA 라이브러리:
+  ✅ 라이브러리 디렉토리 존재
+/usr/local/cuda/lib64/libcudart.so
+/usr/local/cuda/lib64/libcudart.so.12
+/usr/local/cuda/lib64/libcudart.so.12.4.127
 
-환경 변수:
-  CUDA_HOME: 'Not set'
-  FI_PROVIDER: 'Not set'
-  LD_PRELOAD: 'Not set'
+2.4 CUDA PATH 설정:
+  ❌ PATH에 CUDA 없음
 
-EFA Provider 테스트:
-  Docker: 29.1.2,
-  CUDA:
-  NCCL: libnccl.so.2
-  AWS OFI NCCL: /opt/aws-ofi-nccl/lib/libnccl-net.so
-Present
-  Libfabric: fi_info: 1.22.0amzn1.0
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. NCCL (NVIDIA Collective Communications Library)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.1 NCCL 소스:
+  ✅ 소스 디렉토리 존재
+total 56
+drwxr-xr-x 10 root root 4096 Dec  3 14:42 .
+drwxr-xr-x 14 root root 4096 Dec  3 14:48 ..
+drwxr-xr-x  8 root root 4096 Dec  3 14:42 .git
+-rw-r--r--  1 root root   93 Dec  3 14:42 .gitignore
 
-환경 변수:
-  CUDA_HOME: 'Not set'
-  FI_PROVIDER: 'Not set'
-  LD_PRELOAD: 'Not set'
+3.2 NCCL 라이브러리:
+  ✅ 라이브러리 존재
+lrwxrwxrwx 1 root root   12 Dec  3 14:46 /opt/nccl/build/lib/libnccl.so -> libnccl.so.2
+lrwxrwxrwx 1 root root   17 Dec  3 14:46 /opt/nccl/build/lib/libnccl.so.2 -> libnccl.so.2.23.4
+-rwxr-xr-x 1 root root 111M Dec  3 14:46 /opt/nccl/build/lib/libnccl.so.2.23.4
 
-EFA Provider 테스트:
-provider: efa
-    fabric: efa
-    domain: rdmap79s0-rdm
-provider: efa
-    fabric: efa
-    domain: rdmap79s0-rdm
+  NCCL 버전:
+NCCL version 2.23.4+cuda12.4
+
+3.3 NCCL 의존성:
+  라이브러리 의존성:
+        linux-vdso.so.1 (0x00007ffdd49d9000)
+        libstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x000078588f600000)
+        libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x000078588f904000)
+        libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x000078588f8e4000)
+        libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x000078588f200000)
+        /lib64/ld-linux-x86-64.so.2 (0x00007858960d6000)
+
+  CUDA 의존성 확인:
+  ❌ CUDA 의존성 없음
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. EFA (Elastic Fabric Adapter)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4.1 EFA 디바이스:
+  ❌ EFA 디바이스 없음 (헤드노드는 정상)
+
+4.2 EFA 네트워크 인터페이스:
+  ✅ EFA 인터페이스 존재
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+2: ens5: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9001 qdisc mq state UP mode DEFAULT group default qlen 1000
+3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN mode DEFAULT group default
+
+4.3 EFA 드라이버:
+  ✅ EFA 드라이버 모듈 로드됨
+efa                   102400  0
+ib_uverbs             192512  1 efa
+ib_core               507904  2 efa,ib_uverbs
+
+4.4 EFA 패키지:
+  ✅ adwaita-icon-theme 41.0-1ubuntu1
+  ✅ efa 2.10.0-1.amzn1
+  ✅ efa-config 1.17
+  ✅ efa-nv-peermem 1.1.1-1.amzn1
+  ✅ efa-profile 1.7
+  ✅ hicolor-icon-theme 0.17-2
+  ✅ libboost-dev:amd64 1.74.0.3ubuntu7
+  ✅ libcommon-sense-perl:amd64 3.75-2build1
+  ✅ libio-prompt-tiny-perl 0.003-1
+  ✅ libpython3-dev:amd64 3.10.6-1~22.04.1
+  ✅ libpython3-stdlib:amd64 3.10.6-1~22.04.1
+  ✅ perl-openssl-defaults:amd64 5build2
+  ✅ python3 3.10.6-1~22.04.1
+  ✅ python3-dev 3.10.6-1~22.04.1
+  ✅ python3-minimal 3.10.6-1~22.04.1
+  ✅ tcl 8.6.11+1build2
+  ✅ tcl-dev:amd64 8.6.11+1build2
+  ✅ ubuntu-settings 22.04.6
+
+4.5 EFA 설치 디렉토리:
+  ✅ EFA 디렉토리 존재
+total 24
+drwxr-xr-x 6 root root 4096 Oct 18  2024 .
+drwxr-xr-x 9 root root 4096 Oct 18  2024 ..
+drwxr-xr-x 2 root root 4096 Oct 18  2024 bin
+drwxr-xr-x 3 root root 4096 Oct 18  2024 include
+drwxr-xr-x 3 root root 4096 Oct 18  2024 lib
+drwxr-xr-x 3 root root 4096 Oct 18  2024 share
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. Libfabric (OpenFabrics Interface)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5.1 Libfabric 라이브러리:
+  ✅ 라이브러리 존재
+lrwxrwxrwx 1 root root   19 Aug  2  2024 /opt/amazon/efa/lib/libfabric.so -> libfabric.so.1.25.0
+lrwxrwxrwx 1 root root   19 Aug  2  2024 /opt/amazon/efa/lib/libfabric.so.1 -> libfabric.so.1.25.0
+-rw-r--r-- 1 root root 1.2M Aug  2  2024 /opt/amazon/efa/lib/libfabric.so.1.25.0
+
+5.2 fi_info (Libfabric 정보 도구):
+  ✅ 명령 존재
+fi_info: 1.22.0amzn1.0
+libfabric: 1.22.0amzn1.0
+libfabric api: 1.22
+
+5.3 Libfabric Providers:
+  사용 가능한 Providers:
+ofi_rxm:
+    version: 122.0
+shm:
+    version: 122.0
+udp:
+    version: 122.0
+tcp:
+    version: 122.0
+sockets:
+    version: 122.0
+ofi_hook_perf:
+    version: 122.0
+ofi_hook_trace:
+    version: 122.0
+ofi_hook_debug:
+    version: 122.0
+ofi_hook_noop:
+    version: 122.0
+ofi_hook_hmem:
+    version: 122.0
+ofi_hook_dmabuf_peer_mem:
+    version: 122.0
+off_coll:
+    version: 122.0
+sm2:
+    version: 122.0
+ofi_mrail:
+    version: 122.0
+
+5.4 EFA Provider 테스트:
+  ⚠️  EFA provider 사용 불가 (EFA 디바이스 없음)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. AWS OFI NCCL Plugin
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6.1 플러그인 라이브러리:
+  ✅ 플러그인 존재
+-rwxr-xr-x 1 root root 233K Dec  3 14:48 /opt/aws-ofi-nccl/lib/libnccl-net.so
+
+6.2 플러그인 의존성:
+  라이브러리 의존성:
+        libfabric.so.1 => /opt/amazon/efa/lib/libfabric.so.1 (0x00007652417fe000)
+
+6.3 AWS OFI NCCL 소스:
+  ✅ 소스 디렉토리 존재
+total 1256
+drwxr-xr-x 16 root root   4096 Dec  3 14:48 .
+drwxr-xr-x 14 root root   4096 Dec  3 14:48 ..
+drwxr-xr-x  3 root root   4096 Dec  3 14:48 .ci
+drwxr-xr-x  8 root root   4096 Dec  3 14:48 .git
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. MPI (Message Passing Interface)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7.1 OpenMPI:
+  ✅ OpenMPI 디렉토리 존재
+total 28
+drwxr-xr-x 7 root root 4096 Oct 18  2024 .
+drwxr-xr-x 9 root root 4096 Oct 18  2024 ..
+drwxr-xr-x 2 root root 4096 Oct 18  2024 bin
+drwxr-xr-x 2 root root 4096 Oct 18  2024 etc
+drwxr-xr-x 3 root root 4096 Oct 18  2024 include
+drwxr-xr-x 5 root root 4096 Oct 18  2024 lib
+drwxr-xr-x 5 root root 4096 Oct 18  2024 share
+
+7.2 mpirun:
+  ✅ mpirun 명령 존재
+mpirun (Open MPI) 4.1.6
+
+Report bugs to http://www.open-mpi.org/community/help/
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. 환경 변수
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8.1 PATH:
+/opt/amazon/openmpi/bin
+/opt/amazon/efa/bin
+
+8.2 LD_LIBRARY_PATH:
+  ❌ 설정 안 됨
+
+8.3 NCCL 관련 환경 변수:
+  없음
+
+8.4 Libfabric 관련 환경 변수:
+  없음
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. Python 및 ML 프레임워크
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9.1 Python:
+  ✅ Python 존재
+Python 3.10.12
+
+9.2 PyTorch:
+  ❌ PyTorch 없음
+
+9.3 PyTorch CUDA:
+  확인 불가
+
+9.4 PyTorch NCCL:
+  확인 불가
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. 기타
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10.1 Docker:
+  ✅ Docker 존재
+Docker version 29.1.2, build 890dcca
+
+10.2 Slurm:
+  ✅ Slurm 명령 존재
+slurm 23.11.10
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+요약: 헤드노드 설치 상태
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GPU 하드웨어: ❌ 없음 (정상)
+CUDA Toolkit: ✅ 설치됨
+NCCL: ✅ 설치됨
+EFA 소프트웨어: ✅ 설치됨
+EFA 디바이스: ❌ 없음 (정상)
+Libfabric: ✅ 설치됨
+AWS OFI NCCL: ✅ 설치됨
+OpenMPI: ✅ 설치됨
 
 
 ==========================================
-진단 완료
+점검 완료
 ==========================================
+ubuntu@ip-10-0-108-46:~$
 ```
