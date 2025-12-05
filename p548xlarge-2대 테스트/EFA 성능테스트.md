@@ -1,4 +1,139 @@
 
+```
+OSU Micro-Benchmarks EFA 테스트 완벽 가이드
+🎯 전제 조건
+
+    AWS P5 인스턴스 (또는 EFA 지원 인스턴스)
+    2개 이상의 컴퓨트 노드
+    공유 파일시스템 (/fsx 또는 NFS)
+    SSH 키 기반 인증 설정
+
+1️⃣ 환경 준비 (최초 1회)
+A. 헤드 노드에서 실행
+# 1. 공유 디렉토리로 이동
+cd /fsx
+
+# 2. 모듈 시스템 확인
+module av
+
+# 3. OpenMPI 모듈 로드
+module load openmpi/4.1.7  # 또는 사용 가능한 버전
+
+# 4. OSU Micro-Benchmarks 다운로드
+wget http://mvapich.cse.ohio-state.edu/download/mvapich/osu-micro-benchmarks-7.3.tar.gz
+tar xzf osu-micro-benchmarks-7.3.tar.gz
+cd osu-micro-benchmarks-7.3
+
+# 5. 빌드
+./configure CC=mpicc CXX=mpicxx
+make -j$(nproc)
+
+# 6. 빌드 확인
+find . -name "osu_bw" -type f
+# 출력: ./c/mpi/pt2pt/standard/osu_bw
+
+B. SSH 키 설정 확인
+# 헤드 노드에서 컴퓨트 노드로 비밀번호 없이 접속 가능해야 함
+ssh compute-gpu-st-distributed-ml-1 hostname
+ssh compute-gpu-st-distributed-ml-2 hostname
+
+# 만약 비밀번호를 요구하면:
+ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa
+for node in compute-gpu-st-distributed-ml-1 compute-gpu-st-distributed-ml-2; do
+    ssh-copy-id $node
+done
+
+2️⃣ Point-to-Point 대역폭 테스트 (단일 EFA)
+명령어
+cd /fsx/osu-micro-benchmarks-7.3
+
+# 모듈 로드
+module load openmpi/4.1.7
+
+# 대역폭 테스트
+mpirun -np 2 \
+    -H compute-gpu-st-distributed-ml-1:1,compute-gpu-st-distributed-ml-2:1 \
+    --mca pml cm \
+    --mca mtl ofi \
+    --mca mtl_ofi_provider_include efa \
+    -x FI_PROVIDER=efa \
+    -x FI_EFA_USE_DEVICE_RDMA=1 \
+    ./c/mpi/pt2pt/standard/osu_bw
+
+예상 결과
+# OSU MPI Bandwidth Test v7.3
+# Size      Bandwidth (MB/s)
+1                       0.63
+...
+1048576             11,992.28
+2097152             12,097.30
+4194304             12,148.06  ← 12 GB/s (97 Gbps)
+
+```
+
+```
+ubuntu@ip-10-0-31-195:/fsx/osu-micro-benchmarks-7.3$ find /fsx/osu-micro-benchmarks-7.3 -name "osu_bw" -type f
+/fsx/osu-micro-benchmarks-7.3/c/mpi/pt2pt/standard/osu_bw
+ubuntu@ip-10-0-31-195:/fsx/osu-micro-benchmarks-7.3$
+ubuntu@ip-10-0-31-195:/fsx/osu-micro-benchmarks-7.3$
+ubuntu@ip-10-0-31-195:/fsx/osu-micro-benchmarks-7.3$
+ubuntu@ip-10-0-31-195:/fsx/osu-micro-benchmarks-7.3$
+ubuntu@ip-10-0-31-195:/fsx/osu-micro-benchmarks-7.3$
+ubuntu@ip-10-0-31-195:/fsx/osu-micro-benchmarks-7.3$
+ubuntu@ip-10-0-31-195:/fsx/osu-micro-benchmarks-7.3$ module load openmpi/4.1.7
+
+cd /fsx/osu-micro-benchmarks-7.3
+
+mpirun -np 2 \
+    -H compute-gpu-st-distributed-ml-1:1,compute-gpu-st-distributed-ml-2:1 \
+    --mca pml cm \
+    --mca mtl ofi \
+    --mca mtl_ofi_provider_include efa \
+    -x FI_PROVIDER=efa \
+    -x FI_EFA_USE_DEVICE_RDMA=1 \
+    ./c/mpi/pt2pt/standard/osu_bw
+Warning: Permanently added 'compute-gpu-st-distributed-ml-1' (ED25519) to the list of known hosts.
+Warning: Permanently added 'compute-gpu-st-distributed-ml-2' (ED25519) to the list of known hosts.
+# OSU MPI Bandwidth Test v7.3
+# Size      Bandwidth (MB/s)
+# Datatype: MPI_CHAR.
+1                       0.63
+2                       1.78
+4                       3.60
+8                       7.08
+16                     14.14
+32                     28.00
+64                     56.77
+128                   112.36
+256                   223.37
+512                   437.77
+1024                  877.84
+2048                 1704.13
+4096                 3237.71
+8192                 5657.81
+16384                7578.72
+32768                9453.47
+65536               10671.50
+131072              10856.99
+262144              11541.96
+524288              11933.70
+1048576             11992.28
+2097152             12097.30
+4194304             12148.06
+ubuntu@ip-10-0-31-195:/fsx/osu-micro-benchmarks-7.3$
+```
+
+
+
+## 아래 내용은 주의 필요, 게런티 못함
+
+
+
+
+
+
+
+
 ## https://catalog.workshops.aws/ml-on-aws-parallelcluster/en-US/06-observability/08-grafana-osu : 이 워크샵 기반으로 수행
 ### 파티션(큐)이름 변경 및 , 스크립트 변경 필요(hpc7g.16xlarge 용)
 
