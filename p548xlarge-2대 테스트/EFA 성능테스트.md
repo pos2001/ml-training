@@ -70,6 +70,10 @@ mpirun -np 2 \
 4194304             12,148.06  ← 12 GB/s (97 Gbps)
 
 ```
+### 2개 프로세스: 노드당 정확히 1개, Point-to-Point 통신: 프로세스 0 ↔ 프로세스 1, 단일 연결: 하나의 통신 채널
+### EFA 32개 중 1개 테스트라는 의미
+
+
 
 ```
 ubuntu@ip-10-0-31-195:/fsx/osu-micro-benchmarks-7.3$ find /fsx/osu-micro-benchmarks-7.3 -name "osu_bw" -type f
@@ -123,15 +127,56 @@ Warning: Permanently added 'compute-gpu-st-distributed-ml-2' (ED25519) to the li
 ubuntu@ip-10-0-31-195:/fsx/osu-micro-benchmarks-7.3$
 ```
 
+## EFA 1개 latency 테스트
+```
+module load openmpi/4.1.7
+
+# 16 프로세스 (노드당 8개)
+mpirun -np 16 \
+    -H compute-gpu-st-distributed-ml-1:8,compute-gpu-st-distributed-ml-2:8 \
+    --mca pml cm \
+    --mca mtl ofi \
+    -x FI_PROVIDER=efa \
+    -x FI_EFA_USE_DEVICE_RDMA=1 \
+    ./c/mpi/collective/blocking/osu_allreduce -m 4194304
+Warning: Permanently added 'compute-gpu-st-distributed-ml-2' (ED25519) to the list of known hosts.
+Warning: Permanently added 'compute-gpu-st-distributed-ml-1' (ED25519) to the list of known hosts.
+
+# OSU MPI Allreduce Latency Test v7.3
+# Datatype: MPI_CHAR.
+# Size       Avg Latency(us)
+1                      21.80
+2                      21.72
+4                      21.55
+8                      22.40
+16                     94.09
+32                     93.15
+64                     23.23
+128                    23.01
+256                    23.91
+512                    24.24
+1024                   25.68
+2048                   26.97
+4096                   51.02
+8192                   54.78
+16384                 109.71
+32768                 182.03
+65536                 261.06
+131072                344.67
+262144                470.97
+524288                702.64
+1048576              1174.38
+2097152              2354.24
+4194304              4079.75
+```
+
+
+
+
+
 
 
 ## 아래 내용은 주의 필요, 게런티 못함
-
-
-
-
-
-
 
 
 ## https://catalog.workshops.aws/ml-on-aws-parallelcluster/en-US/06-observability/08-grafana-osu : 이 워크샵 기반으로 수행
