@@ -74,6 +74,85 @@ uverbs0 ~ uverbs31 (총 32개)
 
 ```
 
+### 지금까지 수행한 핵심 테스트 스크립트
+```
+
+1. GPU 및 EFA 확인 (직접 실행)
+# GPU 확인
+srun --nodes=2 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
+
+# EFA 디바이스 확인
+srun --nodes=2 bash -c 'echo "$(hostname): $(ls /dev/infiniband/uverbs* 2>/dev/null | wc -l) EFA devices"'
+
+결과:
+
+    16x H100 80GB HBM3
+    64x EFA 디바이스 (각 노드 32개)
+
+2. 종합 테스트 (배치 작업)
+cat > simple_test.sbatch << 'EOF'
+#!/bin/bash
+#SBATCH --job-name=simple-test
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=1
+#SBATCH --exclusive
+#SBATCH --output=simple-test-%j.out
+#SBATCH --error=simple-test-%j.err
+#SBATCH --time=00:05:00
+
+echo "=========================================="
+echo "Simple Test Started"
+echo "=========================================="
+echo "Date: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Nodes: $SLURM_JOB_NODELIST"
+echo "Working directory: $(pwd)"
+echo ""
+
+# 노드 정보
+echo "Node information:"
+srun bash -c 'echo "$(hostname): $(uname -r), $(uptime)"'
+
+echo ""
+
+# GPU 확인
+echo "GPU check:"
+srun bash -c 'echo "$(hostname): $(nvidia-smi --query-gpu=count --format=csv,noheader | head -1) GPUs"'
+
+echo ""
+
+# EFA 확인
+echo "EFA check:"
+srun bash -c 'echo "$(hostname): $(ls /dev/infiniband/uverbs* 2>/dev/null | wc -l) EFA devices"'
+
+echo ""
+
+# 네트워크 연결 테스트
+echo "Network connectivity:"
+NODE1=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -1)
+NODE2=$(scontrol show hostnames $SLURM_JOB_NODELIST | tail -1)
+echo "Pinging from $NODE1 to $NODE2:"
+srun --nodes=1 --nodelist=$NODE1 ping -c 3 $NODE2
+
+echo ""
+echo "=========================================="
+echo "Test Completed Successfully"
+echo "=========================================="
+EOF
+
+sbatch simple_test.sbatch
+
+결과:
+
+    8 GPUs per node
+    32 EFA devices per node - 0.5ms 네트워크 레이턴시
+
+3. 결과 확인
+# 출력 파일 확인 (컴퓨트 노드에서)
+ssh compute-gpu-st-distributed-ml-1 "cat /tmp/aws-efa-installer/tests/simple-test-16.out"
+
+```
+
 ### 테스트 방법
 ```
 ubuntu@ip-10-0-108-46:~$ cat > validate_simple.sh <<'EOF'
